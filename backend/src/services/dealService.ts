@@ -11,6 +11,10 @@ import { dealPricing, fromBaseUnits } from '../utils/money';
  * between "payout attempt committed" and "on-chain send confirmed". They are never
  * final and never auto-retried — see reconcileStuckPayouts. Clients must treat any
  * unknown non-final status as "in progress".
+ * CLOSED is the archival state: a RELEASED deal moves here ~5 min after the seller
+ * payout finalizes (success-close scheduler in index.ts). CLOSED inherits every
+ * post-success read/continue right of RELEASED (channel set-new-owner /
+ * transfer-to-buyer, fee retry) — it only locks mutating pre-success actions.
  */
 export const DEAL_STATUS = {
   AWAITING_DEPOSIT: 'AWAITING_DEPOSIT',
@@ -21,6 +25,7 @@ export const DEAL_STATUS = {
   REFUND_PENDING: 'REFUND_PENDING',
   RELEASED: 'RELEASED',
   REFUNDED: 'REFUNDED',
+  CLOSED: 'CLOSED',
 } as const;
 
 export const DEAL_TYPE = {
@@ -29,7 +34,7 @@ export const DEAL_TYPE = {
   GROUP: 'GROUP',
 } as const;
 
-const FINAL_STATUSES = new Set<string>([DEAL_STATUS.RELEASED, DEAL_STATUS.REFUNDED]);
+const FINAL_STATUSES = new Set<string>([DEAL_STATUS.RELEASED, DEAL_STATUS.REFUNDED, DEAL_STATUS.CLOSED]);
 
 /** Shape used by every Telegram notification helper (single source of truth). */
 export function dealLike(deal: {
@@ -110,6 +115,9 @@ export async function createDealRecord(params: {
   escrowHolderId?: number | null;
   depositToken?: string | null;
   buyerExpectedAddress?: string | null;
+  // Idempotency: frontend wizard generates one UUID per wizard session and reuses
+  // it on retry — a repeated POST returns the existing deal instead of a ghost copy.
+  clientRequestId?: string | null;
 }) {
   // P2-9: legacy buyerId/sellerId params intentionally ignored (never read, stored NULL).
   const {
@@ -131,6 +139,7 @@ export async function createDealRecord(params: {
     escrowHolderId = null,
     depositToken: suppliedToken = null,
     buyerExpectedAddress: suppliedBuyerAddr = null,
+    clientRequestId: suppliedClientKey = null,
   } = params;
 
   const normalizedType = ['P2P', 'CHANNEL', 'GROUP'].includes(String(dealType).toUpperCase())
@@ -154,6 +163,15 @@ export async function createDealRecord(params: {
   }
 
   const buyerExpectedAddress = suppliedBuyerAddr ? String(suppliedBuyerAddr).trim() : null;
+
+  // Idempotency gate: bounded shape (UUID or wz-fallback), anything else is
+  // treated as absent (backward compatible with old clients sending nothing).
+  const rawClientKey = suppliedClientKey ? String(suppliedClientKey).trim() : '';
+  const clientKey = /^[A-Za-z0-9_-]{8,128}$/.test(rawClientKey) ? rawClientKey : null;
+  if (clientKey) {
+    const dup = await db.query('SELECT * FROM deals WHERE client_request_id = $1 LIMIT 1', [clientKey]);
+    if (dup.rows[0]) return dup.rows[0];
+  }
 
   // P2-9: stop writing legacy buyer_id/seller_id (never read) — store NULL
   const res: QueryResult = await db.query(
@@ -182,8 +200,11 @@ export async function createDealRecord(params: {
         channel_verified,
         escrow_holder_id,
         deposit_token,
-        buyer_expected_address
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now(),$15,$16,$17,$18,$19::jsonb,false,$20,$21,$22) RETURNING *`,
+        buyer_expected_address,
+        client_request_id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now(),$15,$16,$17,$18,$19::jsonb,false,$20,$21,$22,$23)
+      ON CONFLICT (client_request_id) WHERE client_request_id IS NOT NULL AND client_request_id <> '' DO NOTHING
+      RETURNING *`,
     [
       null,
       null,
@@ -207,9 +228,16 @@ export async function createDealRecord(params: {
       escrowHolderId,
       depositToken,
       buyerExpectedAddress,
+      clientKey,
     ],
   );
-  return res.rows[0];
+  if (res.rows[0]) return res.rows[0];
+  // Lost a same-key insert race: the winner's row is the canonical deal.
+  if (clientKey) {
+    const won = await db.query('SELECT * FROM deals WHERE client_request_id = $1 LIMIT 1', [clientKey]);
+    if (won.rows[0]) return won.rows[0];
+  }
+  throw new Error('concurrent_create_retry');
 }
 
 export async function getDealById(id: number | string) {
@@ -352,7 +380,7 @@ export async function atomicJoinDeal(dealId: number, token: string, telegramId: 
     if (dealRes.rows.length === 0) throw new Error('deal_not_found');
     const deal = dealRes.rows[0];
     const dealStatus = String(deal.status || '').toUpperCase();
-    if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING'].includes(dealStatus))
+    if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING', 'CLOSED'].includes(dealStatus))
       throw new Error('deal_finished: cannot join a closed or locked deal');
     if (
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === Number(telegramId)) ||
@@ -575,7 +603,7 @@ export async function approveJoinRequest(
   const deal = await getDealById(req.deal_id);
   if (!deal) throw new Error('deal_not_found');
   const st = String((deal as any).status || '').toUpperCase();
-  if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING'].includes(st))
+  if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING', 'CLOSED'].includes(st))
     throw new Error('deal_finished: cannot join a closed or locked deal');
   // Only the creator (the already-joined party) can approve.
   const isCreator =

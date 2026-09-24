@@ -1,4 +1,4 @@
-﻿/* app.js — TonEscrow Mini App: router, views, controllers */
+/* app.js — Savdochi Mini App: router, views, controllers */
 (function () {
   'use strict';
   var TG = window.TG;
@@ -262,10 +262,7 @@
       ? otherRole + ' · ID ' + otherId
       : (deal.buyer_telegram_id ? 'Xaridor ' + deal.buyer_telegram_id : 'Ochiq bitim') +
         (deal.seller_telegram_id ? ' · Sotuvchi ' + deal.seller_telegram_id : '');
-    var chev = UI.h('div', {
-      class: 'deal-chevron',
-      html: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18 15 12 9 6"/></svg>',
-    });
+    var chev = UI.h('div', { class: 'deal-chevron' }, [UI.icon('chevron-down', 'ico-chev')]);
 
     return UI.h(
       'button',
@@ -278,14 +275,34 @@
       },
       [
         UI.h('div', { class: 'deal-top' }, [
-          UI.h('div', { class: 'asset-glyph ' + am.cls, text: am.glyph }),
+          UI.assetIcon(am),
           UI.h('div', { class: 'deal-mid' }, [
             UI.h('div', { class: 'deal-title', text: 'Bitim #' + deal.id + ' · ' + am.symbol }),
             UI.h('div', { class: 'deal-sub', text: sub }),
           ]),
           UI.h('div', { class: 'deal-amt' }, [
             UI.h('b', { text: UI.fmtAmount(deal.amount) + ' ' + am.symbol }),
-            UI.h('div', {}, [UI.h('span', { class: 'badge ' + sm.cls, text: sm.label, style: 'margin-top:5px' })]),
+            UI.h('div', {}, [
+              UI.h(
+                'span',
+                { class: 'badge ' + sm.cls, style: 'margin-top:5px' },
+                (function () {
+                  var st = String(deal.status || '').toUpperCase();
+                  var kids = [];
+                  if (st === 'RELEASE_PENDING' || st === 'REFUND_PENDING') kids.push(UI.icon('clock', ''));
+                  else if (st === 'RELEASED' || st === 'CLOSED') kids.push(UI.icon('circle-check-big', 'ico-pop'));
+                  else {
+                    try {
+                      var c = deal.confirmations;
+                      if (typeof c === 'string') c = JSON.parse(c);
+                      if (c && c.disputed === true) kids.push(UI.icon('alarm-clock', 'ico-ring'));
+                    } catch (e) {}
+                  }
+                  kids.push(UI.h('span', { text: sm.label }));
+                  return kids;
+                })(),
+              ),
+            ]),
           ]),
           chev,
         ]),
@@ -391,6 +408,9 @@
     var pollMs = opts.pollMs || 8000;
     var onChange = typeof opts.onChange === 'function' ? opts.onChange : function () {};
     var notifyNew = opts.notifyNew !== false;
+    // asMessages: render each request as an incoming message bubble (for the
+    // chat flow) instead of a standalone card (deal page top). Same buttons.
+    var asMessages = !!opts.asMessages;
     var box = UI.h('div', { class: 'join-req-box' });
     var prevCount = null;
     var stopped = false;
@@ -523,7 +543,7 @@
             doApprove(r, [approveBtn, rejectBtn]);
           },
         },
-        ['✅ Tasdiqlash'],
+        [UI.icon('circle-check-big', 'ico-pop'), ' Tasdiqlash'],
       );
       rejectBtn = UI.h(
         'button',
@@ -534,8 +554,23 @@
             doReject(r, [approveBtn, rejectBtn]);
           },
         },
-        ['Rad etish'],
+        [UI.icon('trash-2', 'ico-shake'), ' Rad etish'],
       );
+      if (asMessages) {
+        return UI.h('div', { class: 'msg' }, [
+          UI.h('div', { class: 'bubble join-bubble' }, [
+            UI.h('div', { class: 'join-head' }, [
+              avatarFor(r, name),
+              UI.h('div', { style: 'min-width:0;flex:1' }, [
+                UI.h('b', { text: name, style: 'font-size:13.5px' }),
+                UI.h('div', { class: 'small muted', text: uname + (when ? ' · ' + when : '') }),
+              ]),
+            ]),
+            UI.h('div', { style: 'font-size:13.5px;margin:2px 0 4px', text: "Bitimga qo'shilmoqchi 🤝" }),
+            UI.h('div', { class: 'join-msg-actions' }, [approveBtn, rejectBtn]),
+          ]),
+        ]);
+      }
       var card = UI.h('div', { class: 'studio-card inbox-card', style: compact ? 'margin-bottom:8px' : '' }, [
         UI.h('div', { class: 'studio-head' }, [
           avatarFor(r, name),
@@ -563,13 +598,17 @@
         UI.toast("Yangi qo'shilish so'rovi keldi", 'ok');
       }
       prevCount = list.length;
-      box.appendChild(
-        UI.h('div', {
-          class: 'small muted',
-          style: 'margin:0 2px 8px;font-weight:700',
-          text: "Kutilayotgan so'rovlar (" + list.length + ') — shu yerda tasdiqlang',
-        }),
-      );
+      // Card mode keeps its section header; message mode is self-explanatory
+      // (each bubble carries who + ✅/❌), so no header inside the chat flow.
+      if (!asMessages) {
+        box.appendChild(
+          UI.h('div', {
+            class: 'small muted',
+            style: 'margin:0 2px 8px;font-weight:700',
+            text: "Kutilayotgan so'rovlar (" + list.length + ') — shu yerda tasdiqlang',
+          }),
+        );
+      }
       list.forEach(function (r) {
         box.appendChild(reqCard(r));
       });
@@ -607,135 +646,6 @@
 
   /* ================= Wallet ================= */
 
-  function walletConnectSheet() {
-    var content = UI.h('div', {}, [
-      UI.h('div', { class: 'sheet-grabber' }),
-      UI.h('h3', { text: 'Hamyonni ulash' }),
-      UI.h('p', {
-        class: 'sub',
-        text: 'TON hamyoningizni tanlang. Kalitlar faqat sizning qurilmangizda qoladi — non-custodial.',
-      }),
-      UI.h(
-        'button',
-        {
-          class: 'wallet-opt selected',
-          onclick: function () {
-            TG.haptic.tap();
-            Wallet.connect().catch(function () {
-              UI.toast('Hamyon ulanmadi', 'err');
-            });
-            UI.sheetClose();
-          },
-        },
-        [
-          UI.h('div', { class: 'w-icon w-tk', text: '◈' }),
-          UI.h('div', { style: 'flex:1;text-align:left' }, [
-            UI.h('div', { style: 'font-weight:800;font-size:14px', text: 'Tonkeeper' }),
-            UI.h('div', { class: 'small muted', text: 'Eng mashhur · tavsiya qilinadi' }),
-          ]),
-          UI.h('span', { style: 'color:#3B82F6;font-weight:800', text: '✓' }),
-        ],
-      ),
-      UI.h(
-        'button',
-        {
-          class: 'wallet-opt',
-          onclick: function () {
-            TG.haptic.tap();
-            Wallet.connect().catch(function () {
-              UI.toast('Hamyon ulanmadi', 'err');
-            });
-            UI.sheetClose();
-          },
-        },
-        [
-          UI.h('div', { class: 'w-icon w-mt', text: '◎' }),
-          UI.h('div', { style: 'flex:1;text-align:left' }, [
-            UI.h('div', { style: 'font-weight:800;font-size:14px', text: 'MyTonWallet' }),
-            UI.h('div', { class: 'small muted', text: 'Open-source' }),
-          ]),
-          UI.h('span', { class: 'small muted', text: '→' }),
-        ],
-      ),
-      UI.h(
-        'button',
-        {
-          class: 'wallet-opt',
-          onclick: function () {
-            TG.haptic.tap();
-            Wallet.connect().catch(function () {
-              UI.toast('Hamyon ulanmadi', 'err');
-            });
-            UI.sheetClose();
-          },
-        },
-        [
-          UI.h('div', { class: 'w-icon w-w', text: '₮' }),
-          UI.h('div', { style: 'flex:1;text-align:left' }, [
-            UI.h('div', { style: 'font-weight:800;font-size:14px', text: '@wallet in Telegram' }),
-            UI.h('div', { class: 'small muted', text: 'Ilova ichida · kengaytmasiz' }),
-          ]),
-          UI.h('span', { class: 'small muted', text: '→' }),
-        ],
-      ),
-      UI.h('button', {
-        class: 'btn btn-primary',
-        style: 'margin-top:8px',
-        onclick: function () {
-          TG.haptic.medium();
-          Wallet.connect().catch(function () {
-            UI.toast('Hamyon ulanmadi', 'err');
-          });
-          UI.sheetClose();
-        },
-        text: 'Tonkeeper bilan davom etish',
-      }),
-      UI.h('div', { style: 'text-align:center;margin-top:10px' }, [
-        UI.h('button', {
-          class: 'link-btn',
-          onclick: function () {
-            UI.sheetClose();
-          },
-          text: 'Keyinroq',
-        }),
-      ]),
-      UI.h(
-        'div',
-        {
-          style:
-            'margin-top:14px;padding:10px;border-radius:12px;background:var(--success-soft);border:1px solid rgba(52,211,153,.22);display:flex;align-items:center;gap:10px;font-size:12.5px;font-weight:700',
-        },
-        [
-          UI.h('span', {
-            style:
-              'width:8px;height:8px;border-radius:50%;background:var(--success);box-shadow:0 0 0 6px var(--success-soft);display:inline-block',
-          }),
-          UI.h('span', { text: 'Audited escrow · non-custodial' }),
-          UI.h('span', {
-            style:
-              'margin-left:auto;font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;background:#0B0E14;color:var(--success);border:1px solid rgba(52,211,153,.3)',
-            text: 'TON',
-          }),
-        ],
-      ),
-    ]);
-    // Build sheet manually to avoid double grabber
-    var root = document.getElementById('sheet-root');
-    root.innerHTML = '';
-    var backdrop = UI.h('div', {
-      class: 'sheet-backdrop',
-      onclick: function () {
-        UI.sheetClose();
-      },
-    });
-    var sheet = UI.h('div', { class: 'sheet', role: 'dialog', html: '' });
-    sheet.appendChild(content);
-    // remove extra grabber dup (content already has one)
-    root.appendChild(backdrop);
-    root.appendChild(sheet);
-    root.classList.add('open');
-  }
-
   function walletPill() {
     var balEl = UI.h('span', { class: 'wallet-bal small muted', style: 'margin-left:8px', text: '' });
     var btn = UI.h(
@@ -748,17 +658,35 @@
             UI.toast('Hamyon SDK yuklanmoqda…');
             return;
           }
-          if (Wallet.connected()) walletSheet();
-          else walletConnectSheet();
+          if (Wallet.connected()) {
+            walletSheet();
+            return;
+          }
+          // Native TON Connect modal (wallet chooser) — no custom picker sheet.
+          Wallet.connect().catch(function (err) {
+            console.warn('[App] wallet connect failed', err);
+            UI.toast('Hamyon ulanmadi', 'err');
+          });
         },
       },
-      ['🔌 Hamyonni ulash'],
+      [UI.icon('unplug', ''), ' Hamyonni ulash'],
     );
     var wrap = UI.h(
       'div',
       { class: 'wallet-pill-wrap', style: 'display:flex;align-items:center;flex-wrap:wrap;gap:8px' },
       [btn, balEl],
     );
+
+    // Rebuild the disconnected pill (btn.textContent would drop the SVG icon).
+    var showConnect = function () {
+      btn.classList.remove('connected');
+      btn.classList.remove('dot');
+      while (btn.firstChild) btn.removeChild(btn.firstChild);
+      btn.appendChild(UI.icon('unplug', ''));
+      btn.appendChild(document.createTextNode(' Hamyonni ulash'));
+      balEl.textContent = '';
+      balEl.style.display = 'none';
+    };
 
     var render = function (acc) {
       var isConn = Wallet.connected();
@@ -774,7 +702,7 @@
           chain === -239 ? 'Mainnet' : chain === -3 ? 'Testnet' : chain != null ? 'Chain ' + chain : 'TON';
         btn.classList.add('connected');
         btn.classList.add('dot');
-        btn.textContent = '👛 ' + UI.shortAddr(friendly);
+        btn.textContent = UI.shortAddr(friendly);
         balEl.textContent = chainLabel;
         balEl.style.display = '';
         // Fetch balance async — merge into pill like mockup: "UQAb…7f2k · 42.18 TON"
@@ -784,20 +712,16 @@
             var ton = r.balanceTon || (Number(r.balance) / 1e9).toString();
             var n = Number(ton);
             var bal = isFinite(n) ? n.toFixed(4).replace(/\.?0+$/, '') + ' TON' : ton + ' TON';
-            btn.textContent = '👛 ' + UI.shortAddr(friendly) + ' · ' + bal;
+            btn.textContent = UI.shortAddr(friendly) + ' · ' + bal;
             balEl.textContent = chainLabel;
           })
           .catch(function (err) {
             console.warn('[App] balance fetch failed', err);
-            btn.textContent = '👛 ' + UI.shortAddr(friendly);
+            btn.textContent = UI.shortAddr(friendly);
             balEl.textContent = chainLabel;
           });
       } else {
-        btn.textContent = '🔌 Hamyonni ulash';
-        btn.classList.remove('connected');
-        btn.classList.remove('dot');
-        balEl.textContent = '';
-        balEl.style.display = 'none';
+        showConnect();
       }
     };
 
@@ -894,6 +818,7 @@
         },
         [
           UI.h('span', { class: 'mono', text: UI.truncate(friendly, 10, 8) }),
+          UI.icon('copy', 'ico-tap'),
           UI.h('span', { class: 'small muted', text: 'nusxa' }),
         ],
       ),
@@ -903,14 +828,17 @@
       ]),
       balRow,
       UI.h('div', { style: 'display:flex;gap:8px;margin-top:12px' }, [
-        UI.h('button', {
-          class: 'btn btn-ghost',
-          style: 'flex:1',
-          onclick: function () {
-            UI.sheetClose();
+        UI.h(
+          'button',
+          {
+            class: 'btn btn-ghost',
+            style: 'flex:1',
+            onclick: function () {
+              UI.sheetClose();
+            },
           },
-          text: 'Yopish',
-        }),
+          [UI.icon('cross', ''), ' Yopish'],
+        ),
         UI.h(
           'button',
           {
@@ -924,7 +852,7 @@
               });
             },
           },
-          ['Uzish'],
+          [UI.icon('unplug', 'ico-shake'), 'Uzish'],
         ),
       ]),
     ]);
@@ -935,7 +863,7 @@
 
   function viewHome() {
     setTabbar(true);
-    setTopbar('TonEscrow');
+    setTopbar('Savdochi');
 
     // Home has no header: hide the global topbar while this view is mounted.
     // router() runs cleanup() before every view change, which restores it,
@@ -981,12 +909,7 @@
     var stats = UI.h('div', { class: 'stats-grid' });
     var listBox = UI.h('div', { class: 'deal-list' });
     var ptr = UI.h('div', { class: 'ptr', 'aria-hidden': 'true' }, [UI.h('div', { class: 'ptr-spinner' })]);
-    var heroAppIcon = UI.h('div', {
-      class: 'hero-appicon',
-      html: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 9l9 6 9-6-9-6Z"/><path d="M3 12 12 18l9-6"/><path d="M3 15 12 21l9-6"/></svg>',
-    });
     var heroEl = UI.h('div', { class: 'hero' }, [
-      heroAppIcon,
       UI.h('h1', { text: 'Salom, ' + name + ' 👋' }),
       UI.h('p', { text: "Mablag'ni escrow'da bloklang va ishonchli P2P savdo qiling. Har bir bitim himoyalangan." }),
       UI.h('div', { class: 'wallet-row' }, [walletPill()]),
@@ -1001,7 +924,16 @@
         renderList();
       },
     });
-    var searchRow = UI.h('label', { class: 'search-row', style: 'margin-top:4px' }, [searchInputEl]);
+    var searchRow = UI.h('label', { class: 'search-row', style: 'margin-top:4px;position:relative' }, [
+      (function () {
+        var g = UI.icon('search', '');
+        g.style.cssText +=
+          ';position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.55;pointer-events:none';
+        return g;
+      })(),
+      searchInputEl,
+    ]);
+    searchInputEl.style.paddingLeft = '38px';
 
     var root = UI.h(
       'div',
@@ -1010,14 +942,13 @@
         ptr,
         !TG.realUser()
           ? UI.h('div', { class: 'banner info' }, [
-              UI.h(
-                'div',
-                {},
+              UI.h('div', { style: 'display:flex;align-items:center;gap:8px' }, [
+                UI.icon('bot-off', ''),
                 UI.h('div', {
                   class: 'small',
                   text: "Ko'rib chiqish rejimi — to'liq ishlashi uchun sahifani Telegram ichida oching.",
                 }),
-              ),
+              ]),
             ])
           : null,
         heroEl,
@@ -1053,7 +984,7 @@
         done = 0;
       deals.forEach(function (d) {
         var u = String(d.status || '').toUpperCase();
-        if (u === 'RELEASED' || u === 'REFUNDED') done++;
+        if (u === 'RELEASED' || u === 'REFUNDED' || u === 'CLOSED') done++;
         else active++;
       });
       stats.innerHTML = '';
@@ -1091,10 +1022,10 @@
         return true;
       }
       if (f === 'done') {
-        var isDone = u === 'RELEASED' || u === 'REFUNDED';
+        var isDone = u === 'RELEASED' || u === 'REFUNDED' || u === 'CLOSED';
         if (!isDone) return false;
       } else {
-        if (u === 'RELEASED' || u === 'REFUNDED') return false;
+        if (u === 'RELEASED' || u === 'REFUNDED' || u === 'CLOSED') return false;
       }
       if (q) {
         var hay = (
@@ -1126,16 +1057,19 @@
             }),
             UI.h('h3', { text: 'Hech narsa topilmadi' }),
             UI.h('p', { text: '"' + App.state.searchQuery + "\" bo'yicha bitim yo'q — boshqa so'z bilan qidiring." }),
-            UI.h('button', {
-              class: 'btn btn-ghost',
-              style: 'width:auto;padding:10px 18px',
-              onclick: function () {
-                searchInputEl.value = '';
-                App.state.searchQuery = '';
-                renderList();
+            UI.h(
+              'button',
+              {
+                class: 'btn btn-ghost',
+                style: 'width:auto;padding:10px 18px',
+                onclick: function () {
+                  searchInputEl.value = '';
+                  App.state.searchQuery = '';
+                  renderList();
+                },
               },
-              text: 'Qidiruvni tozalash',
-            }),
+              [UI.icon('brush-cleaning', 'ico-shake'), ' Qidiruvni tozalash'],
+            ),
           ]);
           listBox.appendChild(nb);
           return;
@@ -1224,13 +1158,9 @@
     App._homeReload = load;
     bindPullToRefresh(document.getElementById('view'));
     requestAnimationFrame(moveThumb);
-    // Three.js hero backdrop (lazy, guarded, auto-disposed on route change)
-    try {
-      if (window.HeroFX) App.cleanupFns.push(window.HeroFX.mount(heroEl));
-    } catch (e) {}
     load(false);
 
-    setTopbar('TonEscrow');
+    setTopbar('Savdochi');
 
     var t = setInterval(function () {
       load(true);
@@ -1242,12 +1172,60 @@
 
   /* ================= Create deal wizard ================= */
 
-  // Bitim muddati tanlanmaydi — har doim 10 soat. 10 soat ichida to'lov
-  // bo'lmasa bitim serverda saqlangan holda avtomatik yopiladi.
-  var DEAL_DURATION_H = 10;
+  // No fixed closing time is set at creation: the backend keeps the 10h
+  // unpaid auto-close (created_at based) and closes successful deals
+  // (RELEASED → CLOSED) 5 min after the seller payout. The wizard sends no
+  // per-deal deadline.
+
+  // Idempotency key: one per wizard session. Retries reuse the SAME key so a
+  // timeout retry can never mint a second deal (backend dedups on it).
+  function genClientRequestId() {
+    try {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+      var rb = new Uint8Array(16);
+      window.crypto.getRandomValues(rb);
+      rb[6] = (rb[6] & 0x0f) | 0x40;
+      rb[8] = (rb[8] & 0x3f) | 0x80;
+      var hx = function (i) {
+        return ('0' + rb[i].toString(16)).slice(-2);
+      };
+      return (
+        hx(0) +
+        hx(1) +
+        hx(2) +
+        hx(3) +
+        '-' +
+        hx(4) +
+        hx(5) +
+        '-' +
+        hx(6) +
+        hx(7) +
+        '-' +
+        hx(8) +
+        hx(9) +
+        '-' +
+        hx(10) +
+        hx(11) +
+        hx(12) +
+        hx(13) +
+        hx(14) +
+        hx(15)
+      );
+    } catch (e) {
+      return 'wz-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+    }
+  }
 
   function newWizard() {
-    return { step: 1, role: 'buy', asset: 'TON', amount: '', terms: '' };
+    return {
+      step: 1,
+      role: 'buy',
+      asset: 'TON',
+      amount: '',
+      terms: '',
+      clientRequestId: genClientRequestId(),
+      submitting: false,
+    };
   }
 
   function viewCreate() {
@@ -1297,7 +1275,17 @@
 
     function submit() {
       var w = App.wz;
+      // Double-submit guard: the inline button AND the Telegram MainButton fire
+      // the same submit — without this, 2 taps = 2 POSTs = 2 deals (ghost copy).
+      if (w.submitting) return;
+      w.submitting = true;
+      // Freeze both triggers immediately (covers the inline+MainButton race).
+      try {
+        var sbtns = box.querySelectorAll('.btn-primary');
+        for (var sbi = 0; sbi < sbtns.length; sbi++) sbtns[sbi].setAttribute('disabled', '');
+      } catch (e) {}
       var me = App.state.meId || (TG.user && TG.user().id) || 0;
+      if (!w.clientRequestId) w.clientRequestId = genClientRequestId();
       var payload = {
         sellerId: w.role === 'sell' ? me : null,
         buyerId: w.role === 'buy' ? me : null,
@@ -1305,13 +1293,14 @@
         asset: w.asset,
         amount: parseFloat(w.amount),
         terms: w.terms || '',
-        deadline: new Date(Date.now() + DEAL_DURATION_H * 3600000).toISOString(),
+        clientRequestId: w.clientRequestId,
       };
       if (!TG.available) UI.toast('Bitim yaratilmoqda…');
       else TG.main.show('Yaratilmoqda…', function () {}, { progress: true });
 
       Api.createDeal(payload)
         .then(function (res) {
+          w.submitting = false;
           TG.haptic.success();
           TG.preventClose(false);
           TG.main.hide();
@@ -1321,6 +1310,9 @@
           renderSuccess(res.deal, shareLink);
         })
         .catch(function (err) {
+          // Same clientRequestId is kept: a retry after timeout reuses it, so
+          // the backend returns the already-created deal instead of a duplicate.
+          w.submitting = false;
           TG.haptic.error();
           TG.main.hide();
           renderStep();
@@ -1355,14 +1347,17 @@
           }),
           UI.h('div', { class: 'link-box' }, [
             UI.h('div', { class: 'mono', text: shareUrl }),
-            UI.h('button', {
-              class: 'icon-btn',
-              'aria-label': 'Havolani nusxalash',
-              html: '<svg viewBox="0 0 24 24" width="19" height="19"><path fill="currentColor" d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2m0 16H8V7h11z"/></svg>',
-              onclick: function () {
-                UI.copy(shareUrl, 'Bot taklif havolasi nusxalandi');
+            UI.h(
+              'button',
+              {
+                class: 'icon-btn',
+                'aria-label': 'Havolani nusxalash',
+                onclick: function () {
+                  UI.copy(shareUrl, 'Bot taklif havolasi nusxalandi');
+                },
               },
-            }),
+              [UI.icon('copy', 'ico-tap')],
+            ),
           ]),
           UI.h('div', { class: 'btn-row' }, [
             UI.h(
@@ -1370,7 +1365,7 @@
               {
                 class: 'btn btn-primary',
                 onclick: function () {
-                  TG.share(shareUrl, "TonEscrow'da escrow bitimim #" + deal.id + ' — qoshilish uchun bosing');
+                  TG.share(shareUrl, "Savdochi'da escrow bitimim #" + deal.id + ' — qoshilish uchun bosing');
                 },
               },
               [isBotLink ? 'Bot havolani ulashish' : 'Taklifni ulashish'],
@@ -1523,11 +1518,10 @@
               },
             },
             [
-              UI.h('span', {
-                class: 'asset-glyph ' + (key === 'TON' ? 'asset-ton' : 'asset-usdt'),
-                style: 'width:38px;height:38px;font-size:17px;margin-bottom:8px',
-                text: glyph,
-              }),
+              UI.assetIcon(
+                { symbol: key, glyph: glyph, cls: key === 'TON' ? 'asset-ton' : 'asset-usdt' },
+                { style: 'width:38px;height:38px;font-size:17px;margin-bottom:8px' },
+              ),
               UI.h('b', { text: title }),
               UI.h('span', { text: subtext }),
             ],
@@ -1631,7 +1625,11 @@
         box.appendChild(
           UI.h('div', { class: 'btn-row' }, [
             UI.h('button', { class: 'btn btn-ghost', onclick: wizBack }, ['Orqaga']),
-            UI.h('button', { class: 'btn btn-primary', onclick: submit }, ['🔒 Bitim yaratish']),
+            UI.h(
+              'button',
+              { class: 'btn btn-primary', onclick: submit, disabled: App.wz.submitting ? true : undefined },
+              [App.wz.submitting ? 'Yaratilmoqda…' : '🔒 Bitim yaratish'],
+            ),
           ]),
         );
         if (TG.available) TG.main.show('🔒 Bitim yaratish', submit);
@@ -1813,7 +1811,7 @@
                   });
               },
             },
-            ['🔌 Hamyonni ulash'],
+            [UI.icon('unplug', ''), ' Hamyonni ulash'],
           ),
           UI.h(
             'button',
@@ -1920,6 +1918,7 @@
           },
           [
             UI.h('span', { class: 'mono', text: UI.truncate(friendly, 10, 8) }),
+            UI.icon('copy', 'ico-tap'),
             UI.h('span', { class: 'small muted', text: 'nusxalash' }),
           ],
         ),
@@ -2102,6 +2101,7 @@
             },
             [
               UI.h('span', { class: 'mono', text: UI.truncate(UI.toFriendly(payTo), 10, 8) }),
+              UI.icon('copy', 'ico-tap'),
               UI.h('span', { class: 'small muted', text: 'nusxalash' }),
             ],
           ),
@@ -2233,7 +2233,7 @@
       }
 
       var head = UI.h('div', { class: 'deal-head' }, [
-        UI.h('div', { class: 'asset-glyph ' + am.cls, text: am.glyph }),
+        UI.assetIcon(am),
         UI.h('div', {}, [
           UI.h('span', { class: 'amt', text: UI.fmtAmount(deal.amount) }),
           UI.h('span', { class: 'cur', text: am.symbol }),
@@ -2255,7 +2255,10 @@
         {
           label: 'Yuborildi',
           time:
-            deal.status === 'ITEM_SENT' || deal.status === 'RELEASED' || deal.status === 'REFUNDED'
+            deal.status === 'ITEM_SENT' ||
+            deal.status === 'RELEASED' ||
+            deal.status === 'REFUNDED' ||
+            deal.status === 'CLOSED'
               ? deal.updated_at
               : null,
         },
@@ -2306,9 +2309,43 @@
         );
       });
 
+      // Avatar with real Telegram profile photo: initials render instantly,
+      // then upgrade to the photo when GET /api/users/:id/photo resolves.
+      // Unknown partner (tgId null) keeps the "?" placeholder; photo misses
+      // keep initials — a missing photo must never blank the card.
+      function partyAvatar(tgId) {
+        var box = UI.h('div', {
+          class: 'avatar ' + UI.avatarClass(tgId),
+          text: String(tgId == null ? '?' : tgId).slice(-2),
+        });
+        if (tgId == null) return box;
+        try {
+          var p = Api.userPhoto ? Api.userPhoto(tgId) : null;
+          if (p && p.then) {
+            p.then(function (url) {
+              if (!url) return;
+              try {
+                var img = document.createElement('img');
+                img.className = 'avatar-img';
+                img.alt = '';
+                img.referrerPolicy = 'no-referrer';
+                img.onerror = function () {
+                  try {
+                    img.remove();
+                  } catch (e) {}
+                };
+                img.src = url;
+                box.textContent = '';
+                box.appendChild(img);
+              } catch (e) {}
+            }).catch(function () {});
+          }
+        } catch (e) {}
+        return box;
+      }
       function party(roleLabel, tgId, you) {
         return UI.h('div', { class: 'party' + (you ? ' you' : '') }, [
-          UI.h('div', { class: 'avatar ' + UI.avatarClass(tgId), text: String(tgId == null ? '?' : tgId).slice(-2) }),
+          partyAvatar(tgId),
           UI.h('div', { class: 'p-role', text: roleLabel + (you ? ' · Siz' : '') }),
           UI.h('div', { class: 'p-name', text: tgId ? 'ID ' + tgId : 'Sherik kutilmoqda' }),
         ]);
@@ -2364,7 +2401,7 @@
               go('#/deal/' + deal.id + '/chat');
             },
           },
-          ['💬 Bitim chati'],
+          [UI.icon('message-circle', 'ico-wiggle'), ' Bitim chati'],
         ),
       );
       actions.push(
@@ -2376,7 +2413,7 @@
               UI.copy(String(deal.id), 'Bitim ID nusxalandi');
             },
           },
-          ['Bitim ID nusxalash'],
+          [UI.icon('copy', 'ico-tap'), ' Bitim ID nusxalash'],
         ),
       );
 
@@ -2398,6 +2435,7 @@
               },
               [
                 UI.h('span', { class: 'mono', text: UI.truncate(addr, 10, 8) }),
+                UI.icon('copy', 'ico-tap'),
                 UI.h('span', { class: 'small muted', text: 'nusxalash uchun bosing' }),
               ],
             ),
@@ -2414,7 +2452,7 @@
                     TG.openLink('https://tonviewer.com/' + addr);
                   },
                 },
-                ["Tadqiqotchida ko'rish ↗"],
+                ["Tadqiqotchida ko'rish ", UI.icon('external-link', 'ico-ext')],
               ),
               UI.h('span', { class: 'chain-chip small muted', style: 'margin-left:auto', text: '' }),
             ]),
@@ -2531,26 +2569,30 @@
         }
       },
     });
-    var sendBtn = UI.h('button', {
-      class: 'send-btn',
-      'aria-label': 'Yuborish',
-      html: '<svg viewBox="0 0 24 24" width="21" height="21"><path fill="currentColor" d="M3.4 20.4 20.9 12 3.4 3.6 3.3 10l13 2-13 2z"/></svg>',
-      onclick: send,
-    });
+    var sendBtn = UI.h(
+      'button',
+      {
+        class: 'send-btn',
+        'aria-label': 'Yuborish',
+        onclick: send,
+      },
+      [UI.icon('send', 'ico-fly')],
+    );
+    // Error-only banner: the permanent "encrypted" top notice was removed —
+    // error states (no key / not a party) still surface here + via toast.
     var statusBar = UI.h('div', {
       class: 'small muted',
-      style: 'text-align:center;padding:6px;font-size:12px',
-      text: '🔒 Shifrlangan kanal — yuklanmoqda…',
+      style: 'display:none;text-align:center;padding:6px;font-size:12px',
     });
 
-    var joinReqBar = UI.h('div', { style: 'padding:0 2px 6px' });
+    // Join requests live INSIDE the message flow (joinMsgBox node appended
+    // after messages on every poll), not in a separate top bar.
     document.getElementById('view').innerHTML = '';
     document
       .getElementById('view')
       .appendChild(
         UI.h('div', { class: 'chat-wrap' }, [
           statusBar,
-          joinReqBar,
           scroller,
           UI.h('div', { class: 'composer' }, [input, sendBtn]),
         ]),
@@ -2660,30 +2702,50 @@
       if (nearBottom || list.length > prevCount) scroller.scrollTop = scroller.scrollHeight;
     }
 
+    var keyErrorToasted = false;
     function updateStatus() {
+      var locked = !!keyError || !keyReady;
       if (keyError) {
-        statusBar.textContent = '⛔ ' + keyError;
+        // Error-only banner (the permanent top notice is gone by design).
+        statusBar.innerHTML = '';
+        statusBar.style.display = '';
+        statusBar.appendChild(UI.icon('cross', ''));
+        statusBar.appendChild(document.createTextNode(' ' + keyError));
         statusBar.style.color = '#ff6b6b';
-        input.setAttribute('disabled', '');
-        sendBtn.setAttribute('disabled', '');
-      } else if (!keyReady) {
-        statusBar.textContent = "🔒 Shifrlangan kanal o'rnatilmoqda…";
-        statusBar.style.color = '';
+        if (!keyErrorToasted) {
+          keyErrorToasted = true;
+          try {
+            UI.toast(keyError, 'err');
+          } catch (e) {}
+        }
+      } else {
+        statusBar.style.display = 'none';
+      }
+      if (locked) {
         input.setAttribute('disabled', '');
         sendBtn.setAttribute('disabled', '');
       } else {
-        statusBar.textContent = "🔒 Uchdan-uchga shifrlangan · faqat siz va sherigingiz o'qiy oladi";
-        statusBar.style.color = '#7dd3a5';
         input.removeAttribute('disabled');
         sendBtn.removeAttribute('disabled');
       }
     }
 
+    var loadErrorToasted = false;
     async function load() {
       try {
         var raw = await Api.chat(id);
         var decrypted = await decryptList(raw);
         renderMessages(decrypted);
+        loadErrorToasted = false;
+        // Join requests ride the message flow: re-append the live box AFTER
+        // messages (renderMessages wipes the scroller). Empty box = invisible.
+        if (joinMsgBox) {
+          try {
+            var nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 140;
+            scroller.appendChild(joinMsgBox);
+            if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+          } catch (e) {}
+        }
         consecutiveFails = 0;
       } catch (err) {
         consecutiveFails++;
@@ -2707,7 +2769,12 @@
               }),
             ]),
           );
-          statusBar.textContent = '⛔ Bu bitim tomoni emassiz';
+          if (!loadErrorToasted) {
+            loadErrorToasted = true;
+            try {
+              UI.toast('Bu bitim tomoni emassiz', 'err');
+            } catch (e) {}
+          }
         } else if (err && err.status === 401) {
           scroller.innerHTML = '';
           scroller.appendChild(
@@ -2715,7 +2782,12 @@
               UI.h('div', { class: 'small', text: "Shifrlangan chat uchun Mini App'ni Telegram ichida oching." }),
             ]),
           );
-          statusBar.textContent = '⛔ Telegram ichida oching';
+          if (!loadErrorToasted) {
+            loadErrorToasted = true;
+            try {
+              UI.toast('Telegram ichida oching', 'err');
+            } catch (e) {}
+          }
         } else {
           // Transient: keep existing messages, show toast after 2 fails
           if (consecutiveFails >= 2) UI.toast("Chat yuklanmadi — qayta urinib ko'ring", 'err');
@@ -2805,11 +2877,15 @@
     // Boot
     updateStatus();
     initKey();
-    // Inline join approvals at top of chat — creator (either side) approves here.
-    // This is the ONLY approval place in the mini app (no separate page, no bot buttons).
-    // Mounts once; re-checks after 1.5s in case Telegram injected the user late
-    // (App.state.meId can be a stale preview id on fast boot).
+    // Join approvals live INSIDE the message flow as message bubbles with
+    // ✅/❌ buttons (not a separate top bar). This is the ONLY approval place
+    // in the mini app (no separate page, no bot buttons). The live box node is
+    // re-appended after messages on every chat poll (renderMessages wipes the
+    // scroller). Mounts once; re-checks after 1.5s in case Telegram injected
+    // the user late (App.state.meId can be a stale preview id on fast boot).
     var joinBoxMounted = false;
+    // Holds the live join-requests box node; load() appends it after messages.
+    var joinMsgBox = null;
     function freshUid() {
       try {
         var ru = (TG.realUser && TG.realUser()) || null;
@@ -2827,23 +2903,16 @@
           var openSlot = !deal.buyer_telegram_id || !deal.seller_telegram_id;
           if (!isParty || !openSlot || UI.isFinalStatus(deal.status)) return;
           joinBoxMounted = true;
-          joinReqBar.appendChild(
-            joinRequestsBox(id, {
-              compact: true,
-              pollMs: 5000,
-              onChange: function () {
-                load();
-              },
-            }),
-          );
-          // Waiting hint while no request exists — so the creator knows where ✅/❌ will appear.
-          // joinRequestsBox renders nothing when empty, so this hint fills the silence.
-          var hint = UI.h('div', {
-            class: 'small muted',
-            style: 'text-align:center;padding:4px 8px 8px;font-size:12px',
-            text: "Sherik havola orqali qo'shilganda so'rov shu yerda chiqadi — shu yerda ✅ / ❌ bosing",
+          // Not appended anywhere yet: load() moves this live node after the
+          // messages on every poll (message-like placement, no top bar).
+          joinMsgBox = joinRequestsBox(id, {
+            compact: true,
+            pollMs: 5000,
+            asMessages: true,
+            onChange: function () {
+              load();
+            },
           });
-          joinReqBar.appendChild(hint);
         })
         .catch(function () {
           /* not a party / offline — chat shows its own banner */
@@ -3025,7 +3094,7 @@
   function applyThemeMode() {
     try {
       document.body.setAttribute('data-theme-mode', 'dark');
-      localStorage.setItem('tonescrow:theme', 'dark');
+      localStorage.setItem('Savdochi:theme', 'dark');
     } catch (e) {
       /* ignore */
     }
@@ -3175,7 +3244,7 @@
               },
             },
             [
-              UI.h('div', { class: 'li-icon', text: '📡' }),
+              UI.h('div', { class: 'li-icon' }, [UI.icon('router', App.state.apiOk ? 'ico-pulse' : '')]),
               UI.h('div', { class: 'li-main' }, [
                 UI.h('b', { text: 'API ulanish' }),
                 UI.h('span', { text: 'Tekshirish uchun bosing' }),
@@ -3193,7 +3262,7 @@
                   },
                 },
                 [
-                  UI.h('div', { class: 'li-icon', text: '🛠️' }),
+                  UI.h('div', { class: 'li-icon' }, [UI.icon('badge-check', 'ico-pop')]),
                   UI.h('div', { class: 'li-main' }, [
                     UI.h('b', { text: 'Admin vositalari' }),
                     UI.h('span', { text: 'Bildirishnomalar va jurnallar' }),
@@ -3207,7 +3276,7 @@
             {
               class: 'list-item',
               onclick: function () {
-                TG.alert("TonEscrow v2.0 — TON'da P2P escrow bitimlar uchun Telegram Mini App.");
+                TG.alert("Savdochi v2.0 — TON'da P2P escrow bitimlar uchun Telegram Mini App.");
               },
             },
             [
@@ -3237,7 +3306,7 @@
         /* ignore */
       }
     });
-    console.log('[TonEscrow] build v3 — ' + new Date().toISOString());
+    console.log('[Savdochi] build v3 — ' + new Date().toISOString());
 
     TG.init();
     // Prefer real Telegram user when inside Telegram; preview fallback only for browsing

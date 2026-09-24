@@ -13,6 +13,7 @@ export function registerAdminCommands(bot: Bot) {
     if (!isAdminCtx(ctx)) return ctx.reply(`❌ Ruxsat yo'q.\nBu buyruq faqat admin uchun.`);
     const dealId = (ctx.match || '').trim();
     if (!dealId) return ctx.reply(`Foydalanish: /admin_release <deal_id>\nMasalan: /admin_release 12`);
+    if (!/^\d{1,10}$/.test(dealId)) return ctx.reply(`❌ Noto'g'ri deal_id — faqat raqam kiriting.`);
     const result = await adminRelease(ctx.from!.id, dealId);
     if (result.success) {
       await ctx.reply(`✅ Deal #${dealId} chiqarildi.\nPul sotuvchiga yuborildi.`);
@@ -25,6 +26,7 @@ export function registerAdminCommands(bot: Bot) {
     if (!isAdminCtx(ctx)) return ctx.reply(`❌ Ruxsat yo'q.\nBu buyruq faqat admin uchun.`);
     const dealId = (ctx.match || '').trim();
     if (!dealId) return ctx.reply(`Foydalanish: /admin_refund <deal_id>\nMasalan: /admin_refund 12`);
+    if (!/^\d{1,10}$/.test(dealId)) return ctx.reply(`❌ Noto'g'ri deal_id — faqat raqam kiriting.`);
     const result = await adminRefund(ctx.from!.id, dealId);
     if (result.success) {
       await ctx.reply(`✅ Deal #${dealId} qaytarildi.\nPul xaridorga qaytdi.`);
@@ -36,7 +38,7 @@ export function registerAdminCommands(bot: Bot) {
   bot.command('disputes', async (ctx) => {
     if (!isAdminCtx(ctx)) return ctx.reply(`❌ Ruxsat yo'q.\nBu buyruq faqat admin uchun.`);
     const res = await db.query(
-      `SELECT * FROM deals WHERE confirmations->>'disputed' = 'true' AND status NOT IN ('RELEASED','REFUNDED') ORDER BY id DESC LIMIT 20`,
+      `SELECT * FROM deals WHERE confirmations->>'disputed' = 'true' AND status NOT IN ('RELEASED','REFUNDED','CLOSED') ORDER BY id DESC LIMIT 20`,
     );
     if (res.rows.length === 0) {
       await ctx.reply(`✅ Ochilgan nizolar yo'q.\nHammasi joyida.`);

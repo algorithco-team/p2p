@@ -10,7 +10,7 @@
     "preview": "vite preview --port 8080"
   },
   "devDependencies": {
-    "@types/node": "^26.5.1",
+    "@types/node": "^26.6.2",
     "http-server": "^14.1.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.0"
@@ -18,7 +18,8 @@
   "dependencies": {
     "@types/canvas-confetti": "^1.9.0",
     "canvas-confetti": "^1.9.4",
-    "motion": "^13.2.0"
+    "lucide": "^1.47.0",
+    "motion": "^13.4.0"
   },
   "overrides": {
     "qs": "^6.16.0"

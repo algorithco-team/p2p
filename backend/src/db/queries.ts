@@ -131,6 +131,14 @@ export async function ensureTables() {
   // P0-1 deposit token + buyer expected address for sender verification
   await ensureColumn('deals', 'deposit_token TEXT');
   await ensureColumn('deals', 'buyer_expected_address TEXT');
+  // Idempotent deal creation: one UUID per frontend wizard session. Retried
+  // POSTs with the same key return the existing deal (no ghost duplicates).
+  await ensureColumn('deals', 'client_request_id TEXT');
+  try {
+    await pool.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_deals_client_request_id ON deals(client_request_id) WHERE client_request_id IS NOT NULL AND client_request_id <> ''`,
+    );
+  } catch {}
   // unique index for deposit token (partial, only where not null)
   try {
     await pool.query(
@@ -197,6 +205,7 @@ export async function ensureTables() {
 
   // Defense-in-depth: restrict deals.status to canonical enum. P2-8: BUYER_CONFIRMED removed from valid set (dead, never written).
   // Legacy rows with BUYER_CONFIRMED remain readable but new writes must not produce it.
+  // Success-close: CLOSED added (RELEASED deals archived ~5 min after seller payout).
   try {
     // Attempt to migrate old constraint that included BUYER_CONFIRMED: drop if exists then add new
     await pool.query(`ALTER TABLE deals DROP CONSTRAINT IF EXISTS chk_deals_status`);
@@ -204,7 +213,7 @@ export async function ensureTables() {
   try {
     await pool.query(`ALTER TABLE deals ADD CONSTRAINT chk_deals_status CHECK (status IN (
       'AWAITING_DEPOSIT','DEPOSIT_CONFIRMED','ITEM_SENT',
-      'RELEASE_PENDING','REFUND_PENDING','RELEASED','REFUNDED'
+      'RELEASE_PENDING','REFUND_PENDING','RELEASED','REFUNDED','CLOSED'
     ))`);
   } catch (e) {
     const msg = String((e as Error).message || '');
@@ -274,9 +283,10 @@ export async function upsertUserByTelegramId(telegramId: number, username?: stri
   return createUserIfNotExists(telegramId, username);
 }
 
-// Monthly buyer leaderboard — only RELEASED deals count, and only the buyer
+// Monthly buyer leaderboard — only successful deals count (RELEASED, plus CLOSED
+// which is RELEASED archived ~5 min later), and only the buyer
 // (the side that sent TON/USDT) earns rating. Window = current calendar month
-// by completion time (resolved_at). One row per buyer+asset, ranked by volume.
+// by completion time (resolved_at — preserved at release, not re-stamped on close). One row per buyer+asset, ranked by volume.
 export interface BuyerRatingRow {
   telegram_id: number;
   username: string | null;
@@ -296,7 +306,7 @@ export async function getMonthlyBuyerRating(asset: string, limit = 50): Promise<
             COUNT(*)::int AS deals
        FROM deals d
        LEFT JOIN users u ON u.telegram_id = d.buyer_telegram_id
-      WHERE d.status = 'RELEASED'
+       WHERE d.status IN ('RELEASED','CLOSED')
         AND d.buyer_telegram_id IS NOT NULL
         AND UPPER(d.asset) = $1
         AND COALESCE(d.resolved_at, d.updated_at, d.created_at) >= date_trunc('month', now())
