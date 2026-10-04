@@ -16,7 +16,7 @@
     "@ton/core": "^0.63.1",
     "@ton/ton": "^16.3.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.0.3",
+    "dotenv": "^18.0.4",
     "express": "^5.2.1",
     "express-rate-limit": "^8.7.0",
     "pg": "^8.11.0",
@@ -25,7 +25,7 @@
   "devDependencies": {
     "@types/cors": "^2.8.12",
     "@types/express": "^5.0.6",
-    "@types/node": "^20.0.0",
+    "@types/node": "^26.6.3",
     "@types/pg": "^8.10.0",
     "ts-node": "^10.9.0",
     "typescript": "7.0.2",
