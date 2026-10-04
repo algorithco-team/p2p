@@ -31,7 +31,7 @@ import {
   getJoinRequestById,
 } from './services/dealService';
 import { depositComment, releaseComment } from './utils/comments';
-import { encryptedCommentToPayloadB64, jettonTransferPayload } from './utils/tonPayload';
+import { encryptedCommentToPayloadB64, jettonDepositPayload } from './utils/tonPayload';
 import { isEncryptionEnabled, getMasterKey, encryptField, decryptField } from './utils/encryption';
 import { toBaseUnits } from './utils/money';
 import {
@@ -552,25 +552,18 @@ app.post(
       const meId = getIdentityId(req);
       if (meId === null) return res.status(401).json({ error: 'identity_required' });
       const role = String((req.body as Record<string, unknown>).role || 'buy').toLowerCase();
-      const origSellerId = sellerId;
-      const origBuyerId = buyerId;
-      // Counterparty hint from any explicit field (not equal to self)
-      const counterparty =
-        origSellerId !== null && origSellerId !== meId
-          ? origSellerId
-          : cpId !== null && cpId !== meId
-            ? cpId
-            : origBuyerId !== null && origBuyerId !== meId
-              ? origBuyerId
-              : null;
+      // A normal user cannot bind another Telegram account without consent.
+      // The counterparty slot is always filled by the approved invite flow;
+      // only ADMIN_API_KEY operator tooling may create an already-full deal.
+      void cpId;
       if (role === 'sell') {
-        // Caller creates as seller; buyer joins via link (or explicit counterparty)
+        // Caller creates as seller; buyer joins via approved invite.
         sellerId = meId;
-        buyerId = counterparty;
+        buyerId = null;
       } else {
-        // Default: caller creates as buyer; seller joins via link (or explicit counterparty)
+        // Default: caller creates as buyer; seller joins via approved invite.
         buyerId = meId;
-        sellerId = counterparty;
+        sellerId = null;
       }
       // Link-only: no counterparty required — other side is filled via invite link
     }
@@ -587,7 +580,7 @@ app.post(
 
     // CHANNEL/GROUP escrow: optional dealType and channelUsername (additive, P2P untouched)
     const rawDealType = String((req.body as any).dealType || (req.body as any).deal_type || 'P2P').toUpperCase();
-    const dealType = ['P2P', 'CHANNEL', 'GROUP'].includes(rawDealType) ? rawDealType : 'P2P';
+    const dealType = ['P2P', 'CHANNEL', 'GROUP', 'NFT'].includes(rawDealType) ? rawDealType : 'P2P';
     const rawChannelUsername =
       (req.body as any).channelUsername || (req.body as any).channel_username || (req.body as any).username || null;
     let channelUsername: string | null = null;
@@ -597,6 +590,9 @@ app.post(
     const channelTitle: string | null = null;
     const channelSnapshot: Record<string, unknown> | null = null;
     let escrowHolderId: number | null = null;
+    let nftItemAddress: string | null = null;
+    let nftSellerAddress: string | null = null;
+    let nftBuyerAddress: string | null = null;
     if (dealType === 'CHANNEL' || dealType === 'GROUP') {
       const { normalizeChannelUsername } = await import('./services/dealService');
       channelUsername = normalizeChannelUsername(rawChannelUsername);
@@ -608,6 +604,22 @@ app.post(
       const holderRaw = Number(process.env.ESCROW_HOLDER_ID || 8992814642);
       if (!isValidPositiveInt(holderRaw)) return res.status(500).json({ error: 'escrow_holder_misconfigured' });
       escrowHolderId = holderRaw;
+    }
+    if (dealType === 'NFT') {
+      nftItemAddress = String((req.body as any).nftItemAddress || (req.body as any).nft_item_address || '').trim();
+      nftSellerAddress = String(
+        (req.body as any).nftSellerAddress || (req.body as any).nft_seller_address || '',
+      ).trim();
+      nftBuyerAddress = String((req.body as any).nftBuyerAddress || (req.body as any).nft_buyer_address || '').trim();
+      if (!nftItemAddress || !nftSellerAddress)
+        return res.status(400).json({ error: 'nft_item_address_and_seller_address_required' });
+      try {
+        Address.parse(nftItemAddress);
+        Address.parse(nftSellerAddress);
+        if (nftBuyerAddress) Address.parse(nftBuyerAddress);
+      } catch {
+        return res.status(400).json({ error: 'invalid_nft_address' });
+      }
     }
 
     const resolvedPayAddr = resolvePaymentAddress();
@@ -665,6 +677,9 @@ app.post(
         channelSnapshot,
         escrowHolderId,
         buyerExpectedAddress,
+        nftItemAddress,
+        nftSellerAddress,
+        nftBuyerAddress,
         clientRequestId: rawClientKey || null,
       });
     } catch (e) {
@@ -687,7 +702,8 @@ app.post(
     const apiLink = `${req.protocol}://${req.get('host')}/api/deals/${deal.id}/join/${linkToken}`;
     const botLink = getBotDeepLink(deal.id, linkToken, config.botUsername);
     // Memo is encrypted and auto-injected via payload — never show plaintext to user
-    const depositPayload = encryptedCommentToPayloadB64(memo);
+    const dealIsFull = deal.buyer_telegram_id != null && deal.seller_telegram_id != null;
+    const depositPayload = dealIsFull ? encryptedCommentToPayloadB64(memo) : null;
     const releasePayload = encryptedCommentToPayloadB64(outMemo);
     let jettonPayload: string | null = null;
     if (asset.toUpperCase() !== 'TON') {
@@ -697,12 +713,15 @@ app.post(
         // Jetton forward memo is also encrypted (listener will decrypt)
         const { encryptField } = await import('./utils/encryption');
         const encMemo = encryptField(memo);
-        jettonPayload = jettonTransferPayload({
-          amount: BigInt(toBaseUnits(String(amount), asset.toUpperCase())),
-          destination: mockDest,
-          forwardComment: encMemo,
-          forwardTonAmount: BigInt(1000000), // 0.001 TON for forward
-        });
+        jettonPayload = dealIsFull
+          ? jettonDepositPayload({
+              price: String(amount),
+              asset: asset.toUpperCase(),
+              feeBps: config.feeBps,
+              destination: mockDest,
+              forwardComment: encMemo,
+            })
+          : null;
       } catch {
         jettonPayload = null;
       } // best-effort: optional payload; TON path and deal creation are unaffected.
@@ -720,8 +739,9 @@ app.post(
       paymentAddress: payAddr,
       encryption: isEncryptionEnabled() ? 'e2e-aes-256-gcm' : 'transport-only',
       memoEncrypted: true,
-      instructions:
-        asset.toUpperCase() === 'TON'
+      instructions: !dealIsFull
+        ? `Counterparty approval is required before payment can begin.`
+        : asset.toUpperCase() === 'TON'
           ? `Send ${amount} ${asset} to ${payAddr} — memo is auto-injected and encrypted (payload). Just approve the transaction in your wallet.`
           : `Send ${amount} ${asset} (Jetton) to ${payAddr} — forward memo is auto-injected and encrypted (payload). Just approve.`,
     });
@@ -1738,6 +1758,134 @@ app.post(
     return res.json(r);
   }),
 );
+app.post(
+  '/api/deals/:id/channel/return-to-seller',
+  channelLimiter,
+  requireIdentity,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    const caller = getIdentityId(req);
+    if (!Number.isInteger(dealId) || caller === null) return res.status(400).json({ error: 'invalid_request' });
+    const deal: any = await getDealById(dealId);
+    if (!deal) return res.status(404).json({ error: 'deal_not_found' });
+    if (Number(deal.seller_telegram_id) !== caller && !isPrivileged(req, caller))
+      return res.status(403).json({ error: 'only_seller_can_reclaim' });
+    const { returnChannelToSeller } = await import('./services/escrowService');
+    const result = await returnChannelToSeller(dealId);
+    return result.ok ? res.json(result) : res.status(409).json(result);
+  }),
+);
+
+// ── NFT custody flow: seller proof -> escrow custody -> signer delivery -> ownership proof ──
+const nftLimiter = rateLimit({ windowMs: 60_000, max: 20, name: 'nft-flow' });
+app.post(
+  '/api/deals/:id/nft/verify-seller',
+  nftLimiter,
+  requireIdentity,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    const caller = getIdentityId(req);
+    if (!Number.isInteger(dealId) || caller === null) return res.status(400).json({ error: 'invalid_request' });
+    const deal: any = await getDealById(dealId);
+    if (!deal) return res.status(404).json({ error: 'deal_not_found' });
+    if (Number(deal.seller_telegram_id) !== caller && !isPrivileged(req, caller))
+      return res.status(403).json({ error: 'only_seller_can_verify' });
+    const { verifyNftSellerOwnership } = await import('./services/nftEscrowService');
+    try {
+      return res.json(await verifyNftSellerOwnership(dealId));
+    } catch (e) {
+      return res.status(409).json({ error: String((e as Error).message || e) });
+    }
+  }),
+);
+
+app.post(
+  '/api/deals/:id/nft/buyer-address',
+  nftLimiter,
+  requireIdentity,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    const caller = getIdentityId(req);
+    if (!Number.isInteger(dealId) || caller === null) return res.status(400).json({ error: 'invalid_request' });
+    const deal: any = await getDealById(dealId);
+    if (!deal) return res.status(404).json({ error: 'deal_not_found' });
+    const buyerId = Number(deal.buyer_telegram_id);
+    if (buyerId !== caller && !isPrivileged(req, caller))
+      return res.status(403).json({ error: 'only_buyer_can_set_nft_address' });
+    const raw = String((req.body as any).address || (req.body as any).nftBuyerAddress || '').trim();
+    const { setNftBuyerAddress } = await import('./services/nftEscrowService');
+    try {
+      const updated = await setNftBuyerAddress(dealId, buyerId, raw);
+      return res.json({ ok: true, nft_buyer_address: updated.nft_buyer_address });
+    } catch (e) {
+      return res.status(409).json({ error: String((e as Error).message || e) });
+    }
+  }),
+);
+
+app.post(
+  '/api/deals/:id/nft/confirm-escrow',
+  nftLimiter,
+  requireIdentity,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    const caller = getIdentityId(req);
+    if (!Number.isInteger(dealId) || caller === null) return res.status(400).json({ error: 'invalid_request' });
+    const deal: any = await getDealById(dealId);
+    if (!deal) return res.status(404).json({ error: 'deal_not_found' });
+    if (Number(deal.seller_telegram_id) !== caller && !isPrivileged(req, caller))
+      return res.status(403).json({ error: 'only_seller_can_confirm' });
+    const { confirmNftEscrowCustody } = await import('./services/nftEscrowService');
+    try {
+      return res.json(await confirmNftEscrowCustody(dealId));
+    } catch (e) {
+      return res.status(409).json({ error: String((e as Error).message || e) });
+    }
+  }),
+);
+
+app.post(
+  '/api/deals/:id/nft/ship',
+  nftLimiter,
+  payoutLimiter,
+  requireIdentity,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    const caller = getIdentityId(req);
+    if (!Number.isInteger(dealId) || caller === null) return res.status(400).json({ error: 'invalid_request' });
+    const deal: any = await getDealById(dealId);
+    if (!deal) return res.status(404).json({ error: 'deal_not_found' });
+    if (Number(deal.seller_telegram_id) !== caller && !isPrivileged(req, caller))
+      return res.status(403).json({ error: 'only_seller_can_ship' });
+    const { sendNftToBuyer } = await import('./services/nftEscrowService');
+    try {
+      return res.json({ ok: true, ...(await sendNftToBuyer(dealId)) });
+    } catch (e) {
+      return res.status(409).json({ error: String((e as Error).message || e) });
+    }
+  }),
+);
+
+app.post(
+  '/api/deals/:id/nft/recheck-delivery',
+  nftLimiter,
+  requireIdentity,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    const caller = getIdentityId(req);
+    if (!Number.isInteger(dealId) || caller === null) return res.status(400).json({ error: 'invalid_request' });
+    const deal: any = await getDealById(dealId);
+    if (!deal) return res.status(404).json({ error: 'deal_not_found' });
+    const isParty = Number(deal.buyer_telegram_id) === caller || Number(deal.seller_telegram_id) === caller;
+    if (!isParty && !isPrivileged(req, caller)) return res.status(403).json({ error: 'not_a_party_to_deal' });
+    const { confirmNftDelivery } = await import('./services/nftEscrowService');
+    try {
+      return res.json({ ok: true, ...(await confirmNftDelivery(dealId)) });
+    } catch (e) {
+      return res.status(409).json({ error: String((e as Error).message || e) });
+    }
+  }),
+);
 
 // Global inbox — pending join requests across all deals where caller is party
 app.get(
@@ -2217,6 +2365,23 @@ app.get(
     res.json({ stuck: rows });
   }),
 );
+app.post(
+  '/api/admin/stuck/:id/reconcile',
+  requireAdmin,
+  adminMoneyLimiter,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    const decision = String((req.body as any)?.decision || '') as 'finalize' | 'reset';
+    if (!Number.isInteger(dealId) || !['finalize', 'reset'].includes(decision))
+      return res.status(400).json({ error: 'deal_id_and_decision_finalize_or_reset_required' });
+    const { reconcilePendingPayout } = await import('./services/escrowService');
+    try {
+      return res.json(await reconcilePendingPayout(dealId, decision));
+    } catch (e) {
+      return res.status(409).json({ error: String((e as Error).message || e) });
+    }
+  }),
+);
 app.get(
   '/api/admin/fee-failures',
   requireAdmin,
@@ -2327,6 +2492,9 @@ app.get(
     if (!check) return res.status(404).json({ error: 'deal_not_found' });
     if (!check.hasAccess) return res.status(403).json({ error: 'not_a_party_to_deal' });
     const deal = check.deal;
+    if (deal.buyer_telegram_id == null || deal.seller_telegram_id == null) {
+      return res.status(409).json({ error: 'deal_not_fully_joined' });
+    }
     const depositToken = (deal as unknown as { deposit_token?: string }).deposit_token || null;
     const memo = depositComment(dealId, depositToken);
     const outMemo = releaseComment({ id: dealId, amount: deal.amount, asset: deal.asset, terms: deal.terms });
@@ -2337,11 +2505,12 @@ app.get(
       try {
         const payAddr = String(deal.payment_address || resolvePaymentAddress() || '0:' + '00'.repeat(32));
         const { encryptField } = await import('./utils/encryption');
-        jettonPayload = jettonTransferPayload({
-          amount: BigInt(toBaseUnits(String(deal.amount), String(deal.asset).toUpperCase())),
+        jettonPayload = jettonDepositPayload({
+          price: String(deal.amount),
+          asset: String(deal.asset).toUpperCase(),
+          feeBps: (deal as { fee_bps?: number | string | null }).fee_bps ?? config.feeBps,
           destination: Address.parse(payAddr),
           forwardComment: encryptField(memo),
-          forwardTonAmount: BigInt(1000000),
         });
       } catch {
         jettonPayload = null;
@@ -3040,17 +3209,23 @@ function startSchedulers() {
               kind?: 'TON' | 'JETTON';
               via?: 'token' | 'legacy';
             } = { found: false };
+            let missedCheckOk = true;
             try {
               const { checkMissedDepositOnChain } = await import('./blockchain/listener');
               missed = await checkMissedDepositOnChain(d as unknown as import('./blockchain/listener').DealRow);
             } catch (e) {
               logger.warn(`missed deposit check failed for deal #${sanitizeLogValue(d.id)}`, e);
+              missedCheckOk = false;
             }
+            if (!missedCheckOk) continue;
             if (missed.found) {
               // Real funds exist — route through deposit-confirm + on-chain refund, not bare DB close.
               // For JETTON legs the missed check also returns the notifying wallet:
               // a forged-master notification must never confirm (same rule as live).
-              if (missed.kind === 'JETTON' && missed.txSrc) {
+              let missedVerificationFailed = false;
+              if (missed.kind === 'JETTON' && !missed.txSrc) {
+                missedVerificationFailed = true;
+              } else if (missed.kind === 'JETTON' && missed.txSrc) {
                 try {
                   const { expectedJettonWalletForPayment } = await import('./blockchain/listener');
                   const expectedWallet = await expectedJettonWalletForPayment(String(d.payment_address || ''));
@@ -3076,8 +3251,10 @@ function startSchedulers() {
                   }
                 } catch (e) {
                   logger.warn(`missed jetton-master check failed for deal #${sanitizeLogValue(d.id)}`, e);
+                  missedVerificationFailed = true;
                 }
               }
+              if (missedVerificationFailed) continue;
               // Legacy escrow#<id> memos are guessable: on a token-issued deal a
               // legacy match is a stale client or a front-run grief probe (it
               // would CONFIRM the deal and strand the victim's real deposit).
@@ -3222,6 +3399,7 @@ function startSchedulers() {
               }
             } catch (e) {
               logger.warn(`late deposit re-check failed for deal #${sanitizeLogValue(d.id)}`, e);
+              continue;
             }
             // P1-3: use guarded update for EXPIRE (same validation as assert above)
             const client = await db.connect();

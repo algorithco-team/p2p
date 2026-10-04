@@ -29,10 +29,14 @@ vi.mock('../config', () => ({
 vi.mock('./jettonUtils', () => ({
   computeJettonWalletAddress: vi.fn(),
 }));
+vi.mock('./tonClient', () => ({
+  client: { getTransactions: vi.fn() },
+}));
 
 import { db } from '../db/queries';
-import { processTonDeposit, processJettonDeposit } from './listener';
+import { checkMissedDepositOnChain, processTonDeposit, processJettonDeposit } from './listener';
 import { computeJettonWalletAddress } from './jettonUtils';
+import { client } from './tonClient';
 import { updateDealStatus } from '../services/dealService';
 
 vi.mock('../services/dealService', async (importOriginal) => {
@@ -111,6 +115,38 @@ describe('legacy memo hold on token-issued deals', () => {
 });
 
 describe('jetton master forgery defense', () => {
+  it('fails closed when notification source is unavailable', async () => {
+    vi.mocked(db.query).mockImplementation((sql: string) => {
+      if (/FROM deals WHERE deposit_token/.test(sql))
+        return Promise.resolve({ rowCount: 1, rows: [usdtDeal()] } as never);
+      return Promise.resolve({ rowCount: 0, rows: [] } as never);
+    });
+    await expect(
+      processJettonDeposit(PAY_ADDR, { queryId: 0n, amount: 101_000_000n, sender: null }, TOKEN, 'missing-src'),
+    ).rejects.toThrow(/source_missing/);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when master-wallet derivation is unavailable', async () => {
+    const { Address } = await import('@ton/core');
+    vi.mocked(db.query).mockImplementation((sql: string) => {
+      if (/FROM deals WHERE deposit_token/.test(sql))
+        return Promise.resolve({ rowCount: 1, rows: [usdtDeal()] } as never);
+      return Promise.resolve({ rowCount: 0, rows: [] } as never);
+    });
+    mockDerive.mockResolvedValue(null);
+    await expect(
+      processJettonDeposit(
+        PAY_ADDR,
+        { queryId: 0n, amount: 101_000_000n, sender: null },
+        TOKEN,
+        'derive-fail',
+        Address.parse('0:' + '55'.repeat(32)).toString(),
+      ),
+    ).rejects.toThrow(/derivation_empty/);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
   it('rejects notification from unexpected jetton wallet (fake master)', async () => {
     const { Address } = await import('@ton/core');
     const realWallet = Address.parse('0:' + '55'.repeat(32));
@@ -148,5 +184,13 @@ describe('jetton master forgery defense', () => {
       realWallet.toString(),
     );
     expect(mockUpdate).toHaveBeenCalledWith(9, 'DEPOSIT_CONFIRMED', 'jhash_ok', ['AWAITING_DEPOSIT']);
+  });
+});
+
+describe('expiry missed-deposit safety', () => {
+  it('fails closed when transaction history cannot be checked', async () => {
+    vi.mocked(client.getTransactions).mockRejectedValueOnce(new Error('rpc unavailable'));
+
+    await expect(checkMissedDepositOnChain(usdtDeal())).rejects.toThrow(/missed_deposit_check_unavailable/);
   });
 });

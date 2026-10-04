@@ -124,6 +124,7 @@ export async function ensureTables() {
   // never silently re-paid. fee_payout_failed persists fee-leg failures for reconcile.
   await ensureColumn('deals', 'payout_idempotency_key TEXT');
   await ensureColumn('deals', 'payout_attempted_at TIMESTAMPTZ');
+  await ensureColumn('deals', 'payout_from_status TEXT');
   await ensureColumn('deals', 'fee_payout_failed BOOLEAN DEFAULT false');
   await ensureColumn('deals', 'fee_payout_error TEXT');
   await ensureColumn('deals', 'fee_retry_count INT DEFAULT 0');
@@ -131,6 +132,14 @@ export async function ensureTables() {
   // P0-1 deposit token + buyer expected address for sender verification
   await ensureColumn('deals', 'deposit_token TEXT');
   await ensureColumn('deals', 'buyer_expected_address TEXT');
+  // NFT escrow: item identity, expected endpoints, and custody/delivery evidence.
+  await ensureColumn('deals', 'nft_item_address TEXT');
+  await ensureColumn('deals', 'nft_seller_address TEXT');
+  await ensureColumn('deals', 'nft_buyer_address TEXT');
+  await ensureColumn('deals', 'nft_verified_at TIMESTAMPTZ');
+  await ensureColumn('deals', 'nft_escrow_received_at TIMESTAMPTZ');
+  await ensureColumn('deals', 'nft_delivered_at TIMESTAMPTZ');
+  await ensureColumn('deals', 'nft_transfer_idempotency_key TEXT');
   // Idempotent deal creation: one UUID per frontend wizard session. Retried
   // POSTs with the same key return the existing deal (no ghost duplicates).
   await ensureColumn('deals', 'client_request_id TEXT');

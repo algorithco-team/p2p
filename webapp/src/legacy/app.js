@@ -2109,7 +2109,11 @@
             class: 'field-hint',
             style: 'margin-top:8px;color:#7dd3a5',
             text:
-              'Xaridor aniq ' + UI.fmtAmount(deal.amount) + ' ' + am.symbol + " yuboradi — memo avtomatik qo'shiladi.",
+              'Xaridor aniq ' +
+              UI.fmtAmount(Number(deal.amount) + Number(deal.fee_amount || 0)) +
+              ' ' +
+              am.symbol +
+              " yuboradi (narx + komissiya) — memo avtomatik qo'shiladi.",
           }),
         ].filter(Boolean),
       ),

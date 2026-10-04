@@ -103,6 +103,35 @@ describe('P0-1 deposit token attribution', () => {
     expect(mockUpdate).not.toHaveBeenCalled();
   });
 
+  it('does not confirm before both parties have joined', async () => {
+    const token = 'abcddcba'.repeat(4);
+    vi.mocked(db.query).mockImplementation((sql: string) => {
+      if (/FROM deals WHERE deposit_token/.test(sql))
+        return Promise.resolve({
+          rowCount: 1,
+          rows: [
+            {
+              id: 11,
+              asset: 'TON',
+              amount: '10',
+              fee_bps: 100,
+              buyer_telegram_id: 1,
+              seller_telegram_id: null,
+              payment_address: 'UQ_wallet',
+              terms: '',
+              deposit_token: token,
+              buyer_expected_address: null,
+            },
+          ],
+        } as never);
+      return Promise.resolve({ rowCount: 0, rows: [] } as never);
+    });
+    await expect(processTonDeposit('UQ_wallet', null, 10_100_000_000n, 'prejoin', token)).rejects.toThrow(
+      /not_fully_joined/,
+    );
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
   it('sender mismatch does NOT auto-confirm (flagged for manual review)', async () => {
     const token = '11112222333344445555666677778888';
     const { Address } = await import('@ton/core');

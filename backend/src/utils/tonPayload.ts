@@ -1,6 +1,7 @@
 import { beginCell, Address, Cell } from '@ton/core';
 import { JETTON_OPS } from '../blockchain/jettonUtils';
 import { encryptField, decryptField } from './encryption';
+import { dealPricing } from './money';
 
 /**
  * TON payload helpers — ensures memo in ALL on-chain transactions.
@@ -107,6 +108,22 @@ export function jettonTransferPayload(params: {
   }
 
   return builder.endCell().toBoc().toString('base64');
+}
+
+/** Build a buyer deposit payload from the canonical price + fee model. */
+export function jettonDepositPayload(params: {
+  price: string;
+  asset: string;
+  feeBps: number | string;
+  destination: Address;
+  forwardComment: string;
+}): string {
+  return jettonTransferPayload({
+    amount: dealPricing(params.price, params.asset, params.feeBps).expectedDeposit,
+    destination: params.destination,
+    forwardComment: params.forwardComment,
+    forwardTonAmount: 1_000_000n,
+  });
 }
 
 /** Build Jetton transfer notification forward payload comment extraction helper (for tests). */

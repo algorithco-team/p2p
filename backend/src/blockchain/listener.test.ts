@@ -1,5 +1,6 @@
 // AGPL-3.0 — listener deposit-path tests: exact / overpay / underpay.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Address } from '@ton/core';
 
 vi.mock('../db/queries', () => ({
   db: { query: vi.fn(), connect: vi.fn() },
@@ -19,11 +20,18 @@ vi.mock('../utils/tonPayload', () => ({
 vi.mock('../utils/encryption', () => ({
   encryptField: (s: string) => `enc(${s})`,
 }));
+vi.mock('../config', () => ({
+  config: { feeBps: 100, jettonMasterAddress: '0:' + '44'.repeat(32), usdtJettonAddress: '' },
+}));
+vi.mock('./jettonUtils', () => ({
+  computeJettonWalletAddress: vi.fn(),
+}));
 
 import { db } from '../db/queries';
 import { sendTon, sendJetton } from './signerClient';
 import { processTonDeposit, processJettonDeposit } from './listener';
 import { updateDealStatus } from '../services/dealService';
+import { computeJettonWalletAddress } from './jettonUtils';
 
 vi.mock('../services/dealService', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../services/dealService')>();
@@ -31,6 +39,8 @@ vi.mock('../services/dealService', async (importOriginal) => {
 });
 
 const mockUpdate = vi.mocked(updateDealStatus);
+const PAY_ADDR = '0:' + '77'.repeat(32);
+const REAL_JETTON_WALLET = '0:' + '55'.repeat(32);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -55,6 +65,7 @@ beforeEach(() => {
     return Promise.resolve({ rowCount: 0, rows: [] } as never);
   });
   mockUpdate.mockResolvedValue(true);
+  vi.mocked(computeJettonWalletAddress).mockResolvedValue(Address.parse(REAL_JETTON_WALLET));
 });
 
 describe('processTonDeposit', () => {
@@ -101,7 +112,7 @@ describe('processTonDeposit', () => {
               fee_bps: 100,
               buyer_telegram_id: 1,
               seller_telegram_id: 2,
-              payment_address: 'UQ_wallet',
+              payment_address: PAY_ADDR,
               terms: '',
             },
           ],
@@ -126,7 +137,7 @@ describe('processJettonDeposit (USDT)', () => {
               fee_bps: 100,
               buyer_telegram_id: 111,
               seller_telegram_id: 222,
-              payment_address: 'UQ_wallet',
+              payment_address: PAY_ADDR,
               terms: '',
             },
           ],
@@ -136,12 +147,24 @@ describe('processJettonDeposit (USDT)', () => {
   });
 
   it('exact USDT match confirms', async () => {
-    await processJettonDeposit('UQ_wallet', { queryId: 0n, amount: 101_000_000n, sender: null }, 'escrow#9', 'jhash1');
+    await processJettonDeposit(
+      PAY_ADDR,
+      { queryId: 0n, amount: 101_000_000n, sender: null },
+      'escrow#9',
+      'jhash1',
+      REAL_JETTON_WALLET,
+    );
     expect(mockUpdate).toHaveBeenCalledWith(9, 'DEPOSIT_CONFIRMED', 'jhash1', ['AWAITING_DEPOSIT']);
   });
 
   it('USDT underpay waits', async () => {
-    await processJettonDeposit('UQ_wallet', { queryId: 0n, amount: 50_000_000n, sender: null }, 'escrow#9', 'jhash2');
+    await processJettonDeposit(
+      PAY_ADDR,
+      { queryId: 0n, amount: 50_000_000n, sender: null },
+      'escrow#9',
+      'jhash2',
+      REAL_JETTON_WALLET,
+    );
     expect(mockUpdate.mock.calls.filter((c) => c[2] === 'jhash2')).toHaveLength(0);
     expect(vi.mocked(sendJetton)).not.toHaveBeenCalled();
   });

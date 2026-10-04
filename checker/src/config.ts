@@ -22,6 +22,7 @@ export const config = {
   tonApiKey: process.env.TONAPI_KEY || '',
   getgemsApiKey: process.env.GETGEMS_API_KEY || '',
   botToken: process.env.BOT_TOKEN || '',
+  apiKey: process.env.CHECKER_API_KEY || '',
   databaseUrl: process.env.DATABASE_URL || '',
   dnsRootAddress: process.env.DNS_ROOT_ADDRESS || '',
   tmeResolverAddress: process.env.TME_RESOLVER_ADDRESS || '',

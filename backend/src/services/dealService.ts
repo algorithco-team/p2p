@@ -32,6 +32,7 @@ export const DEAL_TYPE = {
   P2P: 'P2P',
   CHANNEL: 'CHANNEL',
   GROUP: 'GROUP',
+  NFT: 'NFT',
 } as const;
 
 const FINAL_STATUSES = new Set<string>([DEAL_STATUS.RELEASED, DEAL_STATUS.REFUNDED, DEAL_STATUS.CLOSED]);
@@ -115,6 +116,9 @@ export async function createDealRecord(params: {
   escrowHolderId?: number | null;
   depositToken?: string | null;
   buyerExpectedAddress?: string | null;
+  nftItemAddress?: string | null;
+  nftSellerAddress?: string | null;
+  nftBuyerAddress?: string | null;
   // Idempotency: frontend wizard generates one UUID per wizard session and reuses
   // it on retry — a repeated POST returns the existing deal instead of a ghost copy.
   clientRequestId?: string | null;
@@ -139,10 +143,13 @@ export async function createDealRecord(params: {
     escrowHolderId = null,
     depositToken: suppliedToken = null,
     buyerExpectedAddress: suppliedBuyerAddr = null,
+    nftItemAddress: suppliedNftItem = null,
+    nftSellerAddress: suppliedNftSeller = null,
+    nftBuyerAddress: suppliedNftBuyer = null,
     clientRequestId: suppliedClientKey = null,
   } = params;
 
-  const normalizedType = ['P2P', 'CHANNEL', 'GROUP'].includes(String(dealType).toUpperCase())
+  const normalizedType = ['P2P', 'CHANNEL', 'GROUP', 'NFT'].includes(String(dealType).toUpperCase())
     ? String(dealType).toUpperCase()
     : DEAL_TYPE.P2P;
   // Single source for fee + expected-deposit math (see utils/money.dealPricing).
@@ -201,8 +208,11 @@ export async function createDealRecord(params: {
         escrow_holder_id,
         deposit_token,
         buyer_expected_address,
+        nft_item_address,
+        nft_seller_address,
+        nft_buyer_address,
         client_request_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now(),$15,$16,$17,$18,$19::jsonb,false,$20,$21,$22,$23)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now(),$15,$16,$17,$18,$19::jsonb,false,$20,$21,$22,$23,$24,$25,$26)
       ON CONFLICT (client_request_id) WHERE client_request_id IS NOT NULL AND client_request_id <> '' DO NOTHING
       RETURNING *`,
     [
@@ -228,6 +238,9 @@ export async function createDealRecord(params: {
       escrowHolderId,
       depositToken,
       buyerExpectedAddress,
+      suppliedNftItem ? String(suppliedNftItem).trim() : null,
+      suppliedNftSeller ? String(suppliedNftSeller).trim() : null,
+      suppliedNftBuyer ? String(suppliedNftBuyer).trim() : null,
       clientKey,
     ],
   );
@@ -506,12 +519,21 @@ export async function createJoinRequest(params: {
     requesterPhotoUrl,
     requesterPhotoFileId,
   } = params;
-  // Upsert: if same requester already pending for same deal+token, return existing
+  // One pending row per requester/deal. If the invite rotated, move the pending
+  // request to the new live token so it cannot be stranded behind an expired link.
   const existing = await db.query(
-    `SELECT * FROM deal_join_requests WHERE deal_id = $1 AND token = $2 AND requester_telegram_id = $3 AND status = 'pending' LIMIT 1`,
-    [dealId, token, requesterTelegramId],
+    `SELECT * FROM deal_join_requests WHERE deal_id = $1 AND requester_telegram_id = $2 AND status = 'pending' LIMIT 1`,
+    [dealId, requesterTelegramId],
   );
-  if (existing.rows[0]) return { request: existing.rows[0], created: false };
+  if (existing.rows[0]) {
+    const refreshed = await db.query(
+      `UPDATE deal_join_requests SET token = $1, requester_username = $2,
+        requester_first_name = $3, requester_photo_file_id = COALESCE($4, requester_photo_file_id), updated_at = now()
+       WHERE id = $5 RETURNING *`,
+      [token, requesterUsername || null, requesterFirstName || null, requesterPhotoFileId || null, existing.rows[0].id],
+    );
+    return { request: refreshed.rows[0], created: false };
+  }
   try {
     const res = await db.query(
       `INSERT INTO deal_join_requests (deal_id, token, requester_telegram_id, requester_username, requester_first_name, requester_photo_url, requester_photo_file_id, status)
@@ -595,33 +617,76 @@ export async function approveJoinRequest(
   approverTelegramId: number,
   expectedDealId?: number,
 ): Promise<{ role: 'buyer' | 'seller'; autoRejected: any[] }> {
-  const req = await getJoinRequestById(requestId);
-  if (!req) throw new Error('request_not_found');
-  if (expectedDealId != null && Number(req.deal_id) !== Number(expectedDealId))
-    throw new Error('deal_mismatch: request does not belong to this deal');
-  if (req.status !== 'pending') throw new Error('request_already_handled');
-  const deal = await getDealById(req.deal_id);
-  if (!deal) throw new Error('deal_not_found');
-  const st = String((deal as any).status || '').toUpperCase();
-  if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING', 'CLOSED'].includes(st))
-    throw new Error('deal_finished: cannot join a closed or locked deal');
-  // Only the creator (the already-joined party) can approve.
-  const isCreator =
-    (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === approverTelegramId) ||
-    (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === approverTelegramId);
-  if (!isCreator) throw new Error('not_authorized_to_approve: only_creator_can_approve');
-  if (Number(req.requester_telegram_id) === approverTelegramId) throw new Error('cannot_approve_own_request');
-  // The invite link must still be alive — otherwise the join below fails with a
-  // cryptic invalid_token. Fail early with a clear, mappable error instead.
-  const link = await getDealLink(String(req.token)).catch(() => null);
-  if (!link || Number(link.deal_id) !== Number(req.deal_id))
-    throw new Error('link_expired: invite link already used or revoked');
-  if (new Date(link.expires_at).getTime() <= Date.now()) throw new Error('link_expired: invite link expired');
-  // Perform atomic join (assigns the empty slot; still the final race guard)
-  const role = await atomicJoinDeal(req.deal_id, req.token, req.requester_telegram_id);
-  await updateJoinRequestStatus(requestId, 'approved');
-  const autoRejected = await rejectOtherPendingRequests(req.deal_id, requestId);
-  return { role, autoRejected };
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const reqRes = await client.query('SELECT * FROM deal_join_requests WHERE id = $1 FOR UPDATE', [requestId]);
+    const req = reqRes.rows[0];
+    if (!req) throw new Error('request_not_found');
+    if (expectedDealId != null && Number(req.deal_id) !== Number(expectedDealId))
+      throw new Error('deal_mismatch: request does not belong to this deal');
+    if (req.status !== 'pending') throw new Error('request_already_handled');
+
+    const dealRes = await client.query('SELECT * FROM deals WHERE id = $1 FOR UPDATE', [Number(req.deal_id)]);
+    const deal = dealRes.rows[0];
+    if (!deal) throw new Error('deal_not_found');
+    const st = String(deal.status || '').toUpperCase();
+    if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING', 'CLOSED'].includes(st))
+      throw new Error('deal_finished: cannot join a closed or locked deal');
+    const isCreator =
+      (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === approverTelegramId) ||
+      (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === approverTelegramId);
+    if (!isCreator) throw new Error('not_authorized_to_approve: only_creator_can_approve');
+    if (Number(req.requester_telegram_id) === approverTelegramId) throw new Error('cannot_approve_own_request');
+
+    const linkRes = await client.query(
+      'SELECT * FROM deal_links WHERE token = $1 AND deal_id = $2 AND expires_at > now() FOR UPDATE',
+      [String(req.token), Number(req.deal_id)],
+    );
+    if (!linkRes.rows[0]) throw new Error('link_expired: invite link expired, used, or revoked');
+
+    let role: 'buyer' | 'seller';
+    if (deal.buyer_telegram_id != null && deal.seller_telegram_id == null) role = 'seller';
+    else if (deal.seller_telegram_id != null && deal.buyer_telegram_id == null) role = 'buyer';
+    else if (deal.buyer_telegram_id == null && deal.seller_telegram_id == null) throw new Error('deal_has_no_creator');
+    else throw new Error('deal_already_full');
+
+    if (role === 'buyer') {
+      const userRes = await client.query('SELECT ton_address FROM users WHERE telegram_id = $1 LIMIT 1', [
+        Number(req.requester_telegram_id),
+      ]);
+      const buyerAddress = userRes.rows[0]?.ton_address ? String(userRes.rows[0].ton_address).trim() : null;
+      await client.query(
+        `UPDATE deals SET buyer_telegram_id = $1,
+          buyer_expected_address = COALESCE(buyer_expected_address, $2), updated_at = now()
+         WHERE id = $3`,
+        [Number(req.requester_telegram_id), buyerAddress, Number(req.deal_id)],
+      );
+    } else {
+      await client.query('UPDATE deals SET seller_telegram_id = $1, updated_at = now() WHERE id = $2', [
+        Number(req.requester_telegram_id),
+        Number(req.deal_id),
+      ]);
+    }
+    await client.query('DELETE FROM deal_links WHERE token = $1', [String(req.token)]);
+    await client.query(`UPDATE deal_join_requests SET status = 'approved', updated_at = now() WHERE id = $1`, [
+      requestId,
+    ]);
+    const rejected = await client.query(
+      `UPDATE deal_join_requests SET status = 'rejected', updated_at = now()
+       WHERE deal_id = $1 AND status = 'pending' AND id <> $2 RETURNING *`,
+      [Number(req.deal_id), requestId],
+    );
+    await client.query('COMMIT');
+    return { role, autoRejected: rejected.rows };
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 export async function rejectJoinRequest(requestId: number, approverTelegramId: number, expectedDealId?: number) {

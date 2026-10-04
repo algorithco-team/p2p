@@ -60,6 +60,8 @@ export const config = {
   ubotApiKey: process.env.UBOT_API_KEY || process.env.UBOT_API_KEY || '',
   utradeUrl: process.env.UTRADE_URL || 'http://utradebot:3003',
   utradeApiKey: process.env.UTRADE_API_KEY || '',
+  checkerUrl: process.env.CHECKER_URL || 'http://checker:3004',
+  checkerApiKey: process.env.CHECKER_API_KEY || '',
   // Fix 3.3: dev auth requires explicit opt-in, never in production by accident
   allowDevAuth: process.env.ALLOW_DEV_AUTH === 'true',
 };
@@ -70,6 +72,11 @@ if (!config.databaseUrl) {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('[config] DATABASE_URL is required in production — refusing to boot fail-open');
   }
+}
+if (process.env.NODE_ENV === 'production' && !(config.jettonMasterAddress || config.usdtJettonAddress)) {
+  throw new Error(
+    '[config] JETTON_MASTER_ADDRESS is required in production — refusing to accept unauthenticated Jetton notifications',
+  );
 }
 export function isValidEncryptionKey(v?: string): boolean {
   const s = String(v ?? config.encryptionKey ?? '').trim();

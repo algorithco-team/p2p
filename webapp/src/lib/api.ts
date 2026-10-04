@@ -275,6 +275,21 @@ export const Api = {
       newOwner ? { newOwner } : {},
     );
   },
+  nftVerifySeller(dealId: number | string): Promise<any> {
+    return request('POST', '/api/deals/' + encodeURIComponent(String(dealId)) + '/nft/verify-seller', {});
+  },
+  nftSetBuyerAddress(dealId: number | string, address: string): Promise<any> {
+    return request('POST', '/api/deals/' + encodeURIComponent(String(dealId)) + '/nft/buyer-address', { address });
+  },
+  nftConfirmEscrow(dealId: number | string): Promise<any> {
+    return request('POST', '/api/deals/' + encodeURIComponent(String(dealId)) + '/nft/confirm-escrow', {});
+  },
+  nftShip(dealId: number | string): Promise<any> {
+    return request('POST', '/api/deals/' + encodeURIComponent(String(dealId)) + '/nft/ship', {});
+  },
+  nftRecheckDelivery(dealId: number | string): Promise<any> {
+    return request('POST', '/api/deals/' + encodeURIComponent(String(dealId)) + '/nft/recheck-delivery', {});
+  },
   joinRequests(dealId: number | string): Promise<any[]> {
     return request('GET', '/api/deals/' + encodeURIComponent(String(dealId)) + '/join-requests').then((d) =>
       Array.isArray(d) ? d : Array.isArray(d?.requests) ? d.requests : [],

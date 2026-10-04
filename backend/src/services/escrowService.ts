@@ -322,6 +322,46 @@ export async function listStuckDeals(limit = 100): Promise<unknown[]> {
   }
 }
 
+/** Explicit operator decision after checking the chain for an ambiguous send. */
+export async function reconcilePendingPayout(
+  dealId: number,
+  decision: 'finalize' | 'reset',
+): Promise<{ ok: true; status: string }> {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const locked = await client.query('SELECT * FROM deals WHERE id = $1 FOR UPDATE', [dealId]);
+    const deal = locked.rows[0];
+    if (!deal) throw new Error('deal_not_found');
+    const pending = String(deal.status);
+    if (!isPendingStatus(pending)) throw new Error('deal_not_pending');
+    let next: string;
+    if (decision === 'finalize') {
+      next = pending === DEAL_STATUS.RELEASE_PENDING ? DEAL_STATUS.RELEASED : DEAL_STATUS.REFUNDED;
+    } else {
+      next = String(deal.payout_from_status || '');
+      const allowed: string[] = [DEAL_STATUS.DEPOSIT_CONFIRMED, DEAL_STATUS.ITEM_SENT];
+      if (!allowed.includes(next)) throw new Error('payout_source_status_missing_or_invalid');
+    }
+    const upd = await client.query(
+      `UPDATE deals SET status = $1, updated_at = now(),
+        resolved_at = CASE WHEN $2 = 'finalize' THEN now() ELSE resolved_at END
+       WHERE id = $3 AND status = $4 RETURNING status`,
+      [next, decision, dealId, pending],
+    );
+    if (!upd.rows[0]) throw new Error('concurrent_transition');
+    await client.query('COMMIT');
+    return { ok: true, status: String(upd.rows[0].status) };
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 // P1-5: retry failed fee legs only (safe: separate idempotency key). Bounded retries, escalating alerts.
 export async function retryFeePayout(dealId: number): Promise<{ ok: boolean; error?: string }> {
   const deal = await getDealById(dealId);
@@ -609,6 +649,15 @@ export async function guardedTransition(
   const pendingStatus = pendingStatusFor(status);
   const idemKey = payoutIdempotencyKey(dealId, status);
 
+  // NFT settlement is asset-for-money, not a manual checkbox: release requires
+  // fresh buyer ownership; refund returns any escrow-held NFT before money.
+  const preflightDeal: any = await getDealById(dealId);
+  if (preflightDeal && String(preflightDeal.deal_type || '').toUpperCase() === 'NFT') {
+    const { assertNftDeliveredForRelease, returnNftToSeller } = await import('./nftEscrowService');
+    if (isRelease) await assertNftDeliveredForRelease(preflightDeal);
+    if (isRefund) await returnNftToSeller(preflightDeal);
+  }
+
   // ── Phase 1: lock, validate,durably mark PENDING (short tx, NO network I/O) ──
   const client = await db.connect();
   let fromStatus: string;
@@ -759,7 +808,7 @@ export async function guardedTransition(
     // Durably record the attempt BEFORE any money moves. From here on, a crash no
     // longer looks like "nothing happened" — the PENDING row + key prove an attempt ran.
     const mark = await client.query(
-      `UPDATE deals SET status = $1, payout_idempotency_key = $2, payout_attempted_at = now(), updated_at = now()
+      `UPDATE deals SET status = $1, payout_idempotency_key = $2, payout_attempted_at = now(), payout_from_status = $4, updated_at = now()
        WHERE id = $3 AND status = $4 RETURNING id`,
       [pendingStatus, idemKey, dealId, fromStatus],
     );
@@ -784,19 +833,10 @@ export async function guardedTransition(
     ({ feeFailed, feeError } = await executePayout(plan!, dealId));
   } catch (e) {
     // Send failed — or its response was lost AFTER the chain accepted it (ambiguous).
-    // Roll the status back so a human CAN retry, but leave a persistent, queryable
-    // alert: before ANY manual retry the admin MUST verify on-chain whether the
-    // transfer with this idempotency key already landed, or the retry double-pays.
+    // Keep PENDING. Restoring the old status would let an API caller immediately
+    // retry while the signer may not yet have persisted its idempotency record.
+    // Only explicit reconciliation may finalize or reset this attempt.
     const msg = String((e as Error).message || '');
-    try {
-      await db.query(`UPDATE deals SET status = $1, updated_at = now() WHERE id = $2 AND status = $3`, [
-        fromStatus!,
-        dealId,
-        pendingStatus,
-      ]);
-    } catch (rbErr) {
-      logger.error(`Payout rollback failed for deal #${dealId} — manual reconciliation required`, rbErr);
-    }
     try {
       const { saveAdminAlert } = await import('../db/queries');
       await saveAdminAlert(
@@ -815,10 +855,10 @@ export async function guardedTransition(
         plan!.principalHuman,
         plan!.assetUpper,
       );
-      throw new Error(`payout_failed: ${msg}`);
+      throw new Error(`payout_pending_reconciliation: ${msg}`);
     }
     logger.error(`On-chain send failed for deal #${dealId} (${status})`, e);
-    throw new Error(`onchain_send_failed: ${msg}`);
+    throw new Error(`payout_pending_reconciliation: ${msg}`);
   }
 
   // ── Phase 3: finalize only if the row is still OUR pending attempt ──
@@ -975,6 +1015,10 @@ export async function markItemSent(sellerTelegramId: number, dealId: number | st
       await client.query('ROLLBACK');
       return { success: false, message: 'Bitim topilmadi' };
     }
+    if (String(deal.deal_type || '').toUpperCase() === 'NFT') {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'NFT delivery must be verified on-chain via /nft/recheck-delivery.' };
+    }
     const isSeller = deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === sellerTelegramId;
     if (!isSeller) {
       await client.query('ROLLBACK');
@@ -1038,6 +1082,15 @@ export async function markItemSent(sellerTelegramId: number, dealId: number | st
  */
 export async function buyerApproveReceipt(buyerTelegramId: number, dealId: number | string) {
   const id = Number(dealId);
+  try {
+    const preflight: any = await getDealById(id);
+    if (preflight && String(preflight.deal_type || '').toUpperCase() === 'NFT') {
+      const { assertNftDeliveredForRelease } = await import('./nftEscrowService');
+      await assertNftDeliveredForRelease(preflight);
+    }
+  } catch (e) {
+    return { success: false, message: String((e as Error).message || e) };
+  }
   const idemKey = payoutIdempotencyKey(id, DEAL_STATUS.RELEASED);
   const pendingStatus = DEAL_STATUS.RELEASE_PENDING;
   // ── Phase 1: lock, validate, durably mark RELEASE_PENDING (short tx, no network I/O) ──
@@ -1198,7 +1251,7 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
 
     // Durably record the attempt BEFORE money moves (see IDEMPOTENCY MODEL above).
     const mark = await client.query(
-      `UPDATE deals SET status = $1, payout_idempotency_key = $2, payout_attempted_at = now(), updated_at = now()
+      `UPDATE deals SET status = $1, payout_idempotency_key = $2, payout_attempted_at = now(), payout_from_status = $4, updated_at = now()
        WHERE id = $3 AND status = $4 RETURNING id`,
       [pendingStatus, idemKey, id, fromStatus],
     );
@@ -1223,19 +1276,10 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
   try {
     ({ feeFailed, feeError } = await executePayout(plan!, id));
   } catch (e) {
-    // Ambiguous failure: the transfer may have landed despite the error. Roll back to
-    // a retryable status but persist everything an admin needs to verify on-chain
-    // before any manual retry (idempotency key) — a blind retry would double-pay.
+    // Ambiguous failure: the transfer may have landed despite the error. Keep
+    // RELEASE_PENDING so the buyer cannot retry. An admin must reconcile the
+    // deterministic key against chain/signer state before finalizing or resetting.
     const msg = String((e as Error).message || '');
-    try {
-      await db.query(`UPDATE deals SET status = $1, updated_at = now() WHERE id = $2 AND status = $3`, [
-        fromStatus!,
-        id,
-        pendingStatus,
-      ]);
-    } catch (rbErr) {
-      logger.error(`buyerApproveReceipt rollback failed for #${id} — manual reconciliation required`, rbErr);
-    }
     logger.error(`buyerApproveReceipt payout failed for deal #${id}`, e);
     try {
       const { saveAdminAlert } = await import('../db/queries');
@@ -1254,7 +1298,7 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
     );
     return {
       success: false,
-      message: msg.startsWith('payout_failed') ? msg : `payout_failed: to'lov yuborilmadi: ${msg}`,
+      message: `payout_pending_reconciliation: to'lov natijasi noaniq, admin tekshirishi shart: ${msg}`,
     };
   }
 
@@ -1485,7 +1529,7 @@ export async function requestTransferToEscrow(
   if (!deal) return { ok: false, error: 'deal_not_found' };
   if (Number(deal.seller_telegram_id) !== Number(sellerTelegramId))
     return { ok: false, error: 'only_seller_can_transfer' };
-  if (String(deal.status) !== DEAL_STATUS.DEPOSIT_CONFIRMED && String(deal.status) !== DEAL_STATUS.AWAITING_DEPOSIT)
+  if (String(deal.status) !== DEAL_STATUS.DEPOSIT_CONFIRMED)
     return { ok: false, error: `invalid_status ${deal.status} need DEPOSIT_CONFIRMED` };
   const channelId = deal.channel_username || deal.channel_id;
   try {
@@ -1535,6 +1579,9 @@ export async function confirmTransferToEscrow(
   const st = String(deal.status || '').toUpperCase();
   if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING', 'CLOSED'].includes(st)) {
     return { ok: false, error: `deal_finished: cannot confirm escrow on ${st} deal` };
+  }
+  if (st !== DEAL_STATUS.DEPOSIT_CONFIRMED && st !== DEAL_STATUS.ITEM_SENT) {
+    return { ok: false, error: `invalid_status ${st} need DEPOSIT_CONFIRMED` };
   }
   const res = await checkEscrowHolderOwnership(dealId);
   if (!res.ok) return { ok: false, error: res.error };
@@ -1682,5 +1729,41 @@ export async function transferChannelToBuyer(
       }
     }
     return { ok: false, error: msg };
+  }
+}
+
+/** Recovery path for a refunded channel/group that is still held by escrow. */
+export async function returnChannelToSeller(dealId: number | string): Promise<{ ok: boolean; error?: string }> {
+  const deal: any = await getDealById(dealId);
+  if (!deal) return { ok: false, error: 'deal_not_found' };
+  if (!isChannelDeal(deal)) return { ok: false, error: 'not_channel_deal' };
+  if (String(deal.status) !== DEAL_STATUS.REFUNDED) return { ok: false, error: 'deal_not_refunded' };
+  if (deal.seller_telegram_id == null) return { ok: false, error: 'seller_missing' };
+  // Always inspect live ownership. The seller may have transferred ownership
+  // but failed to press "confirm", leaving no transfer_to_escrow_at marker.
+  // Trusting only the marker would strand precisely that recovery case.
+  const custody = await checkEscrowHolderOwnership(dealId);
+  if (!custody.ok) return { ok: false, error: custody.error || 'escrow_custody_check_failed' };
+  if (!custody.isEscrowOwner) {
+    if (Number(custody.currentCreatorId) === Number(deal.seller_telegram_id)) {
+      await db.query('UPDATE deals SET transfer_to_escrow_at = NULL, updated_at = now() WHERE id = $1', [
+        Number(dealId),
+      ]);
+      return { ok: true };
+    }
+    return { ok: false, error: `channel_not_held_by_escrow: current creator ${custody.currentCreatorId ?? 'unknown'}` };
+  }
+  const channelId = deal.channel_username || deal.channel_id;
+  try {
+    const takeoverKind = String(deal.deal_type).toUpperCase() === 'GROUP' ? 'group' : 'channel';
+    await ubotFetch(`/${takeoverKind}/${encodeURIComponent(String(channelId))}/takeover`, {
+      method: 'POST',
+      body: JSON.stringify({ newOwnerId: String(deal.seller_telegram_id) }),
+      headers: { 'x-idempotency-key': `channel-refund-${dealId}` },
+    });
+    await db.query('UPDATE deals SET transfer_to_escrow_at = NULL, updated_at = now() WHERE id = $1', [Number(dealId)]);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e as Error).message || e) };
   }
 }
