@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.4.1](https://github.com/algorithco/p2p/compare/v2.4.0...v2.4.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* **deals:** stop ghost duplicate deals on double-submit and retry ([2fb222f](https://github.com/algorithco/p2p/commit/2fb222fda6458ea51052a73c44b158927187fe1c))
+* **deals:** stop ghost duplicate deals on double-submit and retry ([098076e](https://github.com/algorithco/p2p/commit/098076eee5d3e429c62feee270271208083955a8))
+
+## [2.4.0](https://github.com/algorithco/p2p/compare/v2.3.0...v2.4.0) (2026-09-19)
+
+
+### Features
+
+* **deals:** close deal 5 minutes after success, add CLOSED state ([c18687d](https://github.com/algorithco/p2p/commit/c18687d8778bd325903ab6ec71fce18090d1ca0c))
+* **deals:** close deal 5 minutes after success, add CLOSED state ([53a06b5](https://github.com/algorithco/p2p/commit/53a06b5dafc4eacfac66489f6af63551653b04d2))
+
+## [2.3.0](https://github.com/algorithco/p2p/compare/v2.2.0...v2.3.0) (2026-09-19)
+
+
+### Features
+
+* **webapp:** simplify home hero, dark-blue wallet button with unplug icon ([328de33](https://github.com/algorithco/p2p/commit/328de33e3633bd34841004229719bcaca9d38e66))
+
+## [2.2.0](https://github.com/algorithco/p2p/compare/v2.1.0...v2.2.0) (2026-09-19)
+
+
+### Features
+
+* **webapp:** use official USDT circular badge for USDT asset icon ([3f39122](https://github.com/algorithco/p2p/commit/3f391220228577cbd4a31c1b0881a770e36aba5c))
+* **webapp:** use official USDT circular badge for USDT asset icon ([f79947f](https://github.com/algorithco/p2p/commit/f79947ff7f773caed708eaef401443260f4f93d1))
+
 ## [2.1.0](https://github.com/algorithco/p2p/compare/v2.0.0...v2.1.0) (2026-09-18)
 
 
