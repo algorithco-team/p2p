@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.4.2](https://github.com/algorithco-team/p2p/compare/v2.4.1...v2.4.2) (2026-10-04)
+
+
+### Bug Fixes
+
+* **bot:** point Ilovani ochish button to uz.trqsh.uz ([9b6f45f](https://github.com/algorithco-team/p2p/commit/9b6f45f2dffaf7ffacf3e7d6a0848c2fe1a0776d))
+* **bot:** point Ilovani ochish button to uz.trqsh.uz ([14b5ce9](https://github.com/algorithco-team/p2p/commit/14b5ce93ac0341baa38e34ec809cc2fc6756e151))
+* **checker:** restore dotenv and @types/node ranges reverted by [#70](https://github.com/algorithco-team/p2p/issues/70) ([4748fe9](https://github.com/algorithco-team/p2p/commit/4748fe96c76141746b0e7e81b976123e7681e3b7))
+* **deps:** resolve moderate+ audit findings in backend, ubot, utradebot ([8ae4c16](https://github.com/algorithco-team/p2p/commit/8ae4c166b187617ba90b25189056fcccbaf379e6))
+
 ## [2.4.1](https://github.com/algorithco/p2p/compare/v2.4.0...v2.4.1) (2026-09-19)
 
 
