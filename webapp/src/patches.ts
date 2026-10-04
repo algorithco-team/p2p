@@ -324,7 +324,7 @@ function filterDealCards() {
 }
 
 function patchViewCreate() {
-  // Intercept create deal to inject CHANNEL/GROUP selector + username
+  // Intercept create deal to inject CHANNEL/GROUP/NFT custody fields.
   const viewEl = document.getElementById('view')!;
   const obs = new MutationObserver(() => {
     if (location.hash !== '#/create') return;
@@ -350,11 +350,24 @@ function patchViewCreate() {
           UI.h('option', { value: 'P2P', text: 'P2P — narsa / xizmat (standart)' } as any),
           UI.h('option', { value: 'CHANNEL', text: 'CHANNEL — Telegram kanal (@username)' } as any),
           UI.h('option', { value: 'GROUP', text: 'GROUP — Telegram superguruh/kanal' } as any),
+          UI.h('option', { value: 'NFT', text: 'NFT — TON NFT escrow' } as any),
         ]),
         UI.h('input', {
           id: 'channel-username-input',
           class: 'input',
           placeholder: '@username yoki t.me havola (CHANNEL/GROUP uchun shart)',
+          style: 'display:none',
+        }) as any,
+        UI.h('input', {
+          id: 'nft-item-address-input',
+          class: 'input',
+          placeholder: 'NFT item address',
+          style: 'display:none',
+        }) as any,
+        UI.h('input', {
+          id: 'nft-seller-address-input',
+          class: 'input',
+          placeholder: 'Seller wallet currently owning the NFT',
           style: 'display:none',
         }) as any,
         UI.h('div', {
@@ -368,12 +381,17 @@ function patchViewCreate() {
     const sel = wrap.querySelector('#deal-type-sel') as HTMLSelectElement;
     const inp = wrap.querySelector('#channel-username-input') as HTMLInputElement;
     const hint = wrap.querySelector('#channel-hint') as HTMLElement;
+    const nftItem = wrap.querySelector('#nft-item-address-input') as HTMLInputElement;
+    const nftSeller = wrap.querySelector('#nft-seller-address-input') as HTMLInputElement;
     sel.addEventListener('change', () => {
       const v = sel.value;
       const show = v === 'CHANNEL' || v === 'GROUP';
       inp.style.display = show ? '' : 'none';
       hint.style.display = show ? '' : 'none';
+      nftItem.style.display = v === 'NFT' ? '' : 'none';
+      nftSeller.style.display = v === 'NFT' ? '' : 'none';
       if (show) inp.focus();
+      if (v === 'NFT') nftItem.focus();
     });
     anchor.parentNode!.insertBefore(wrap, anchor.nextSibling);
     // Wrap Api.createDeal to inject dealType/channelUsername from DOM
@@ -392,6 +410,16 @@ function patchViewCreate() {
               payload.deal_type = dt;
               payload.channelUsername = uname;
               payload.channel_username = uname;
+            } else if (dt === 'NFT') {
+              const item = (document.getElementById('nft-item-address-input') as HTMLInputElement | null)?.value.trim();
+              const seller = (
+                document.getElementById('nft-seller-address-input') as HTMLInputElement | null
+              )?.value.trim();
+              if (!item || !seller) throw new Error('NFT item and seller wallet required');
+              payload.dealType = 'NFT';
+              payload.deal_type = 'NFT';
+              payload.nftItemAddress = item;
+              payload.nftSellerAddress = seller;
             }
           }
         } catch {
@@ -418,6 +446,18 @@ function patchViewCreate() {
                 payload.deal_type = dt;
                 payload.channelUsername = uname;
                 payload.channel_username = uname;
+              } else if (dt === 'NFT') {
+                const item = (
+                  document.getElementById('nft-item-address-input') as HTMLInputElement | null
+                )?.value.trim();
+                const seller = (
+                  document.getElementById('nft-seller-address-input') as HTMLInputElement | null
+                )?.value.trim();
+                if (!item || !seller) throw new Error('NFT item and seller wallet required');
+                payload.dealType = 'NFT';
+                payload.deal_type = 'NFT';
+                payload.nftItemAddress = item;
+                payload.nftSellerAddress = seller;
               }
             }
           } catch {}
@@ -484,6 +524,7 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
   const st = String(deal.status || '').toUpperCase();
   const dealType = String((deal as any).deal_type || (deal as any).dealType || 'P2P').toUpperCase();
   const isChannelDeal = dealType === 'CHANNEL' || dealType === 'GROUP';
+  const isNftDeal = dealType === 'NFT';
   // ── Yakuniy holatlar — har ikki tomonga toast + banner (admin qarori ham shu yerda ko'rinadi) ──
   // CLOSED is RELEASED archived by the success-close scheduler — same success copy.
   const isReleased = st === 'RELEASED' || st === 'CLOSED';
@@ -510,6 +551,9 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
   // ── CHANNEL/GROUP custodial flow (via @gramchioka) — isolated, P2P below unchanged ──
   if (isChannelDeal) {
     return await renderChannelEscrow(deal, isBuyer, isSeller, uid, anchor, st);
+  }
+  if (isNftDeal) {
+    return await renderNftEscrow(deal, isBuyer, isSeller, anchor, st);
   }
   // Always show payout input for seller when not final
   const payoutAddr = (deal as any).payout_address as string | undefined;
@@ -738,6 +782,65 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
     anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
     return;
   }
+}
+
+async function renderNftEscrow(deal: any, isBuyer: boolean, isSeller: boolean, anchor: HTMLElement, st: string) {
+  const bar = UI.h('div', {
+    class: 'webapp-bar',
+    style: 'margin:12px 0;display:flex;flex-direction:column;gap:10px',
+  }) as HTMLElement;
+  bar.appendChild(
+    UI.h('div', { class: 'banner info' }, [
+      UI.h('div', { class: 'small', text: `NFT: ${UI.truncate(String(deal.nft_item_address || ''), 12, 10)}` }),
+      UI.h('div', {
+        class: 'small muted',
+        text: `Escrow wallet: ${UI.truncate(String(deal.payment_address || ''), 12, 10)}`,
+      }),
+    ]),
+  );
+  const action = (label: string, fn: () => Promise<any>) => {
+    const btn = UI.h(
+      'button',
+      {
+        class: 'btn primary',
+        onclick: async () => {
+          (btn as HTMLButtonElement).disabled = true;
+          try {
+            await fn();
+            UI.toast('Tasdiqlandi', 'ok');
+            location.reload();
+          } catch (e: any) {
+            UI.toast(e?.message || 'Xato', 'err');
+            (btn as HTMLButtonElement).disabled = false;
+          }
+        },
+      },
+      [label],
+    ) as HTMLButtonElement;
+    bar.appendChild(btn);
+  };
+  if (isSeller && !deal.nft_verified_at) action('NFT egaligini tekshirish', () => Api.nftVerifySeller(deal.id));
+  if (isBuyer && !deal.nft_buyer_address) {
+    const input = UI.h('input', {
+      class: 'input',
+      placeholder: 'NFT qabul qiluvchi TON manzil',
+      value: Wallet.address() || '',
+    }) as HTMLInputElement;
+    bar.appendChild(input);
+    action('NFT qabul manzilini saqlash', () => Api.nftSetBuyerAddress(deal.id, input.value.trim()));
+  }
+  if (isSeller && st === 'DEPOSIT_CONFIRMED' && !deal.nft_escrow_received_at) {
+    bar.appendChild(
+      UI.h('div', { class: 'small muted', text: 'NFTni escrow walletga yuboring, so‘ng qabulni tekshiring.' }),
+    );
+    action('Escrow NFTni qabul qildimi?', () => Api.nftConfirmEscrow(deal.id));
+  }
+  if (isSeller && st === 'DEPOSIT_CONFIRMED' && deal.nft_escrow_received_at && !deal.nft_transfer_idempotency_key)
+    action('NFTni xaridorga yuborish', () => Api.nftShip(deal.id));
+  if ((isBuyer || isSeller) && st === 'DEPOSIT_CONFIRMED' && deal.nft_transfer_idempotency_key)
+    action('NFT yetkazilganini tekshirish', () => Api.nftRecheckDelivery(deal.id));
+  if (isBuyer && st === 'ITEM_SENT') action('NFTni oldim — pulni chiqarish', () => Api.approveDeal(deal.id));
+  anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
 }
 
 async function renderChannelEscrow(

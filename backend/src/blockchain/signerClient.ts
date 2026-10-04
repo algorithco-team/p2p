@@ -92,6 +92,22 @@ export async function sendJetton(params: {
   });
 }
 
+export async function sendNft(params: {
+  itemAddress: string;
+  newOwner: string;
+  responseDestination?: string;
+  forwardAmount?: string;
+  comment?: string;
+  idempotencyKey: string;
+}): Promise<{ seqno: number; duplicate?: boolean }> {
+  const { idempotencyKey, ...body } = params;
+  return request<{ seqno: number; duplicate?: boolean }>('/send-nft', {
+    method: 'POST',
+    headers: { 'x-idempotency-key': idempotencyKey },
+    body: JSON.stringify({ ...body, idempotencyKey }),
+  });
+}
+
 export async function deploySignerWallet(value: string = '0.05'): Promise<{ seqno: number }> {
   return request<{ seqno: number }>('/deploy', {
     method: 'POST',

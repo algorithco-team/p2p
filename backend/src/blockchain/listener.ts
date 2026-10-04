@@ -29,16 +29,19 @@ const cursors = new Map<string, { lt: string; hash: string }>();
 const jettonWalletCache = new Map<string, string>();
 let lastJettonMasterWarnAt = 0;
 
+/** A transaction that must be retried from the same cursor position. */
+export class RetryableListenerError extends Error {}
+
 /**
  * P0 fake-jetton defense: resolve the payment address's jetton wallet from the
  * CONFIGURED master. A transfer_notification for a real USDT deposit always
  * arrives with inMessage.src == this wallet. A notification minted through an
  * attacker's fake master arrives from a DIFFERENT wallet and must never
- * confirm a deal. Returns null when verification is impossible (master
- * unconfigured or RPC failure) — callers fail OPEN with a loud warn in that
- * case (status quo), but fail CLOSED on positive mismatch.
+ * confirm a deal. Verification failures are retryable and fail closed: callers
+ * must retain their cursor (or defer expiry) until the configured master can be
+ * checked successfully.
  */
-export async function expectedJettonWalletForPayment(paymentAddr: string): Promise<Address | null> {
+export async function expectedJettonWalletForPayment(paymentAddr: string): Promise<Address> {
   const masterRaw = (config.jettonMasterAddress || config.usdtJettonAddress || '').trim();
   if (!masterRaw) {
     const now = Date.now();
@@ -48,7 +51,7 @@ export async function expectedJettonWalletForPayment(paymentAddr: string): Promi
         'Listener: JETTON_MASTER_ADDRESS/USDT_JETTON_ADDRESS unset — jetton master forgery check DISABLED. Set the master to stop fake-master notifications confirming USDT deposits.',
       );
     }
-    return null;
+    throw new RetryableListenerError('jetton_master_not_configured');
   }
   let master: Address;
   let pay: Address;
@@ -56,7 +59,7 @@ export async function expectedJettonWalletForPayment(paymentAddr: string): Promi
     master = Address.parse(masterRaw);
     pay = Address.parse(paymentAddr);
   } catch {
-    return null;
+    throw new RetryableListenerError('jetton_master_or_payment_address_invalid');
   }
   const key = `${master.toRawString()}|${pay.toRawString()}`;
   const cached = jettonWalletCache.get(key);
@@ -70,13 +73,14 @@ export async function expectedJettonWalletForPayment(paymentAddr: string): Promi
   try {
     const { computeJettonWalletAddress } = await import('./jettonUtils');
     const w = await computeJettonWalletAddress(master, pay);
-    if (!w) return null;
+    if (!w) throw new RetryableListenerError('jetton_wallet_derivation_empty');
     jettonWalletCache.set(key, w.toRawString());
     return w;
-  } catch {
-    // RPC blip (toncenter 429s happen): do NOT strand real deposits on a
-    // failed derivation — skip this check for now, keep polling.
-    return null;
+  } catch (e) {
+    if (e instanceof RetryableListenerError) throw e;
+    // Authentication is mandatory. A transient RPC failure keeps the cursor
+    // on this transaction so it is retried; it never weakens verification.
+    throw new RetryableListenerError(`jetton_wallet_verification_unavailable: ${String((e as Error).message || e)}`);
   }
 }
 
@@ -207,6 +211,12 @@ export interface DealRow {
   terms: string | null;
   deposit_token: string | null;
   buyer_expected_address: string | null;
+}
+
+function assertDealReadyForDeposit(deal: DealRow): void {
+  if (deal.buyer_telegram_id == null || deal.seller_telegram_id == null) {
+    throw new RetryableListenerError(`deal_not_fully_joined:${deal.id}`);
+  }
 }
 
 export async function findAwaitingDealById(dealId: number, paymentAddress?: string): Promise<DealRow | null> {
@@ -428,7 +438,9 @@ export async function checkMissedDepositOnChain(deal: DealRow): Promise<{
     }
   } catch (e) {
     logger.warn(`checkMissedDeposit for deal #${deal.id} failed`, e);
-    return { found: false };
+    throw new RetryableListenerError(
+      `missed_deposit_check_unavailable:${deal.id}:${String((e as Error).message || e)}`,
+    );
   }
   return { found: false };
 }
@@ -564,6 +576,8 @@ export async function processTonDeposit(
     } catch {}
     if (await holdLegacyMemoOnTokenDeal(deal, src, txHash, legacyHuman, 'TON', addr)) return;
   }
+
+  assertDealReadyForDeposit(deal);
 
   // P0-1 (b): sender verification — if buyer expected address is known, src must match
   if (src) {
@@ -811,51 +825,51 @@ export async function processJettonDeposit(
     if (await holdLegacyMemoOnTokenDeal(deal, note.sender, txHash, legacyJHuman, 'USDT', addr)) return;
   }
 
+  assertDealReadyForDeposit(deal);
+
   // P0 fake-jetton defense: the notification must arrive from the payment
   // address's jetton wallet derived from the CONFIGURED master. Mismatch =
   // forged notification via attacker's master — never confirm.
-  if (txSrc) {
+  if (!txSrc) throw new RetryableListenerError(`jetton_notification_source_missing:${deal.id}`);
+  try {
+    const expectedWallet = await expectedJettonWalletForPayment(addr);
+    let same = false;
     try {
-      const expectedWallet = await expectedJettonWalletForPayment(addr);
-      if (expectedWallet) {
-        let same = false;
-        try {
-          same = Address.parse(txSrc).toRawString() === expectedWallet.toRawString();
-        } catch {
-          same = false;
-        }
-        if (!same) {
-          let jHuman = note.amount.toString();
-          try {
-            jHuman = fromBaseUnits(note.amount, 'USDT');
-          } catch {}
-          const msg = `Jetton master mismatch Deal #${deal.id}: notification src ${txSrc} != expected wallet ${expectedWallet.toString()} — forged master suspected, NOT auto-confirmed`;
-          logger.warn(msg);
-          try {
-            const { saveAdminAlert } = await import('../db/queries');
-            await saveAdminAlert('jetton_master_mismatch', msg, {
-              dealId: deal.id,
-              expected: expectedWallet.toString(),
-              actual: txSrc,
-              amount: jHuman,
-              asset: 'USDT',
-              txHash,
-            });
-          } catch {}
-          try {
-            await unknownToAdminsAndSave({
-              amount: jHuman,
-              asset: 'USDT',
-              address: addr,
-              memo: `Jetton master mismatch Deal #${deal.id} — manual review required`,
-            });
-          } catch {}
-          return;
-        }
-      }
-    } catch (e) {
-      logger.warn(`jetton master check failed for deal #${deal.id}`, e);
+      same = Address.parse(txSrc).toRawString() === expectedWallet.toRawString();
+    } catch {
+      same = false;
     }
+    if (!same) {
+      let jHuman = note.amount.toString();
+      try {
+        jHuman = fromBaseUnits(note.amount, 'USDT');
+      } catch {}
+      const msg = `Jetton master mismatch Deal #${deal.id}: notification src ${txSrc} != expected wallet ${expectedWallet.toString()} — forged master suspected, NOT auto-confirmed`;
+      logger.warn(msg);
+      try {
+        const { saveAdminAlert } = await import('../db/queries');
+        await saveAdminAlert('jetton_master_mismatch', msg, {
+          dealId: deal.id,
+          expected: expectedWallet.toString(),
+          actual: txSrc,
+          amount: jHuman,
+          asset: 'USDT',
+          txHash,
+        });
+      } catch {}
+      try {
+        await unknownToAdminsAndSave({
+          amount: jHuman,
+          asset: 'USDT',
+          address: addr,
+          memo: `Jetton master mismatch Deal #${deal.id} — manual review required`,
+        });
+      } catch {}
+      return;
+    }
+  } catch (e) {
+    if (e instanceof RetryableListenerError) throw e;
+    throw new RetryableListenerError(`jetton_master_check_failed:${deal.id}:${String((e as Error).message || e)}`);
   }
 
   // P0-1 (b): sender verification for jetton (note.sender is on-chain sender)
@@ -1090,7 +1104,9 @@ async function fetchRecentTransactions(
       page = await client.getTransactions(addr, { limit: 30, ...(lt ? { lt, hash } : {}) });
     } catch (e) {
       logger.warn(`Listener: getTransactions failed for ${addr.toString()} (page ${p + 1})`, e);
-      break;
+      throw new RetryableListenerError(
+        `transaction_history_unavailable:${addr.toRawString()}:${String((e as Error).message || e)}`,
+      );
     }
     if (!page.length) break;
     let reachedSeen = false;
@@ -1155,10 +1171,13 @@ async function pollAddress(addr: string) {
     try {
       await handleTransaction(addr, tx);
     } catch (err) {
-      logger.error(`Failed handling tx on ${addr} (lt ${lt})`, err);
+      // Money safety beats liveness: keep the cursor before a failed tx and
+      // retry it next tick. Permanent malformed inputs are classified inside
+      // handleTransaction and return normally, so only uncommitted/transient
+      // failures reach this path.
+      logger.error(`Failed handling tx on ${addr} (lt ${lt}); cursor retained for retry`, err);
+      break;
     }
-    // Advance past even failed txs: a poison tx must not stall the poll loop
-    // forever (failures are logged + admin-alerted inside the handlers).
     cur = entry;
   }
 

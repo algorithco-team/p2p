@@ -249,6 +249,29 @@ app.post('/send-jetton', authMiddleware, async (req, res) => {
   }
 });
 
+app.post('/send-nft', authMiddleware, async (req, res) => {
+  try {
+    const { itemAddress, newOwner, responseDestination, forwardAmount, comment } = req.body || {};
+    if (!itemAddress || !newOwner) return res.status(400).json({ error: 'itemAddress and newOwner required' });
+    try {
+      const { Address } = await import('@ton/core');
+      Address.parse(itemAddress);
+      Address.parse(newOwner);
+      if (responseDestination) Address.parse(responseDestination);
+    } catch {
+      return res.status(400).json({ error: 'invalid address' });
+    }
+    const idemKey = idemKeyFrom(req);
+    if (!idemKey) return res.status(400).json({ error: 'idempotency_key_required' });
+    const phash = paramsHashOf({ itemAddress, newOwner, responseDestination, forwardAmount, comment });
+    await idempotentSend(res, 'POST /send-nft', idemKey, phash, () =>
+      signer.sendNft({ itemAddress, newOwner, responseDestination, forwardAmount, comment }),
+    );
+  } catch (err) {
+    sendError(res, err, '/send-nft');
+  }
+});
+
 app.post('/deploy-escrow', authMiddleware, async (req, res) => {
   try {
     const { escrowAddress, escrowStateInit, value, bodyBoc } = req.body || {};

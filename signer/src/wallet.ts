@@ -370,6 +370,45 @@ export class W5Signer {
     return { seqno };
   }
 
+  /** Transfer a TEP-62 NFT item owned by this signer wallet. */
+  async sendNft(req: {
+    itemAddress: string;
+    newOwner: string;
+    responseDestination?: string;
+    forwardAmount?: string;
+    comment?: string;
+  }): Promise<{ seqno: number }> {
+    const { wallet, keyPair } = this.assertConfigured();
+    const item = Address.parse(req.itemAddress);
+    const newOwner = Address.parse(req.newOwner);
+    const responseDestination = Address.parse(req.responseDestination || wallet.address.toString());
+    const forwardAmount = parseTonValue(req.forwardAmount || '0.01');
+    if (req.comment && req.comment.length > 120) throw new Error('forward_comment_too_long');
+    const forwardPayload = req.comment
+      ? beginCell().storeUint(0, 32).storeStringTail(req.comment).endCell()
+      : beginCell().endCell();
+    const body = beginCell()
+      .storeUint(0x5fcc3d14, 32)
+      .storeUint(0, 64)
+      .storeAddress(newOwner)
+      .storeAddress(responseDestination)
+      .storeBit(0)
+      .storeCoins(forwardAmount)
+      .storeBit(1)
+      .storeRef(forwardPayload)
+      .endCell();
+    const provider = this.client.provider(wallet.address, null);
+    const seqno = await this.fetchSeqno(wallet, provider);
+    const { internal } = await import('@ton/ton');
+    await wallet.sendTransfer(provider, {
+      seqno,
+      secretKey: keyPair.secretKey,
+      sendMode: SendMode.PAY_GAS_SEPARATELY,
+      messages: [internal({ to: item, value: toNano('0.08'), bounce: true, body })],
+    });
+    return { seqno };
+  }
+
   /**
    * Sign and send a custom internal message carrying StateInit + body.
    * Used by backend's Escrow deployer: needs to send Deploy{queryId} body to escrow address with StateInit.

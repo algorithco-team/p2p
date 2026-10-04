@@ -6,7 +6,7 @@ vi.mock('../db/queries', () => ({
 }));
 
 import { db } from '../db/queries';
-import { atomicJoinDeal } from './dealService';
+import { approveJoinRequest, atomicJoinDeal } from './dealService';
 
 const mockDb = vi.mocked(db);
 
@@ -108,5 +108,29 @@ describe('atomicJoinDeal', () => {
     await expect(atomicJoinDeal(999, 'tok', 222)).rejects.toThrow(/deal_not_found/);
     expect(client.query).toHaveBeenCalledWith('ROLLBACK');
     expect(client.release).toHaveBeenCalled();
+  });
+});
+
+describe('approveJoinRequest transaction', () => {
+  it('assigns role, refreshes buyer address, consumes link, and resolves requests in one commit', async () => {
+    const client = scriptedClient([
+      {
+        match: /FROM deal_join_requests WHERE id.*FOR UPDATE/,
+        rows: [{ id: 5, deal_id: 1, token: 'tok', requester_telegram_id: 222, status: 'pending' }],
+      },
+      {
+        match: /FROM deals WHERE id.*FOR UPDATE/,
+        rows: [{ id: 1, buyer_telegram_id: null, seller_telegram_id: 111, status: 'AWAITING_DEPOSIT' }],
+      },
+      { match: /FROM deal_links WHERE token/, rows: [{ token: 'tok', deal_id: 1 }] },
+      { match: /FROM users WHERE telegram_id/, rows: [{ ton_address: '0:' + '22'.repeat(32) }] },
+      { match: /UPDATE deal_join_requests SET status = 'rejected'/, rows: [{ id: 6 }], rowCount: 1 },
+    ]);
+    mockDb.connect.mockResolvedValue(client as never);
+    const result = await approveJoinRequest(5, 111, 1);
+    expect(result.role).toBe('buyer');
+    expect(result.autoRejected).toHaveLength(1);
+    expect(client.query).toHaveBeenCalledWith('COMMIT');
+    expect(client.query).toHaveBeenCalledWith(expect.stringContaining('buyer_expected_address'), expect.anything());
   });
 });

@@ -55,6 +55,7 @@ import {
   buyerApproveReceipt,
   markItemSent,
   reconcileStuckPayouts,
+  reconcilePendingPayout,
   retryFeePayout,
 } from './escrowService';
 
@@ -293,6 +294,43 @@ describe('guardedTransition', () => {
       /seller_ton_address_required|payout_address_required/,
     );
   });
+
+  it('keeps the deal pending when the principal send result is ambiguous', async () => {
+    const client = mockClient([dealRow()]);
+    mockDb.connect.mockResolvedValue(client as never);
+    mockSendTon.mockRejectedValueOnce(new Error('timeout after broadcast'));
+
+    await expect(guardedTransition(1, DEAL_STATUS.RELEASED)).rejects.toThrow(/payout_pending_reconciliation/);
+
+    expect(client.query.mock.calls.some(([sql]) => /payout_from_status\s*=\s*\$4/i.test(String(sql)))).toBe(true);
+    expect(mockDb.query.mock.calls.some(([sql]) => /UPDATE deals SET status/i.test(String(sql)))).toBe(false);
+  });
+});
+
+describe('reconcilePendingPayout', () => {
+  it('finalizes a pending release only through the explicit reconciliation path', async () => {
+    const client = {
+      query: vi.fn().mockImplementation((sql: string) => {
+        if (/SELECT \* FROM deals/i.test(sql)) {
+          return Promise.resolve({ rows: [{ id: 4, status: 'RELEASE_PENDING', payout_from_status: 'ITEM_SENT' }] });
+        }
+        if (/UPDATE deals SET status/i.test(sql)) {
+          return Promise.resolve({ rowCount: 1, rows: [{ status: 'RELEASED' }] });
+        }
+        return Promise.resolve({ rowCount: 0, rows: [] });
+      }),
+      release: vi.fn(),
+    };
+    mockDb.connect.mockResolvedValue(client as never);
+
+    await expect(reconcilePendingPayout(4, 'finalize')).resolves.toEqual({ ok: true, status: 'RELEASED' });
+    expect(client.query).toHaveBeenCalledWith(expect.stringContaining('WHERE id = $3 AND status = $4'), [
+      'RELEASED',
+      'finalize',
+      4,
+      'RELEASE_PENDING',
+    ]);
+  });
 });
 
 describe('admin guards', () => {
@@ -340,6 +378,31 @@ describe('buyerApproveReceipt guards', () => {
     const r = await buyerApproveReceipt(222, 1);
     expect(r.success).toBe(false);
     expect(String(r.message)).toMatch(/jarayonda|progress/i);
+  });
+
+  it('keeps RELEASE_PENDING when the payout response is lost', async () => {
+    const client = mockClient([
+      {
+        id: 1,
+        status: 'ITEM_SENT',
+        asset: 'TON',
+        amount: '5',
+        fee_bps: 100,
+        seller_telegram_id: 111,
+        buyer_telegram_id: 222,
+        payout_address: '0:' + '11'.repeat(32),
+        terms: '',
+      },
+    ]);
+    mockDb.connect.mockResolvedValue(client as never);
+    mockSendTon.mockRejectedValueOnce(new Error('connection closed after send'));
+
+    const result = await buyerApproveReceipt(222, 1);
+
+    expect(result.success).toBe(false);
+    expect(String(result.message)).toMatch(/payout_pending_reconciliation/);
+    expect(client.query.mock.calls.some(([sql]) => /payout_from_status\s*=\s*\$4/i.test(String(sql)))).toBe(true);
+    expect(mockDb.query.mock.calls.some(([sql]) => /UPDATE deals SET status/i.test(String(sql)))).toBe(false);
   });
 });
 

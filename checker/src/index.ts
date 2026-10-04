@@ -1,6 +1,7 @@
 // checker — standalone NFT ownership checker. Reads only, never signs.
 // NOT wired into the main project: own port, own tables, no imports from it.
 import cors from 'cors';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -58,6 +59,28 @@ function validWallet(v: unknown): string | null {
   }
 }
 
+function apiKeyMatches(req: Request): boolean {
+  if (!config.apiKey) return false;
+  const raw = req.headers['x-api-key'];
+  const provided = String(Array.isArray(raw) ? raw[0] || '' : raw || '');
+  const a = Buffer.from(provided, 'utf8');
+  const b = Buffer.from(config.apiKey, 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function requireCheckerAuth(req: Request, res: Response, next: NextFunction): Response | void {
+  if (!config.apiKey) return bad(res, 'checker_api_key_not_configured', 503);
+  if (!apiKeyMatches(req)) return bad(res, 'unauthorized', 401);
+  next();
+}
+
+function requireAuthForBinding(req: Request, res: Response): Response | null {
+  if (req.body?.telegramId == null) return null;
+  if (!config.apiKey) return bad(res, 'checker_api_key_not_configured', 503);
+  if (!apiKeyMatches(req)) return bad(res, 'unauthorized_binding', 401);
+  return null;
+}
+
 const API_DOCS = {
   name: 'escrow-checker',
   version: '0.1.0',
@@ -74,14 +97,14 @@ const API_DOCS = {
     {
       method: 'POST',
       path: '/api/check/username',
-      auth: 'public',
-      desc: 'Verify an NFT username and bind owner wallet <-> telegram_id',
+      auth: 'public verification; x-api-key required when telegramId is supplied',
+      desc: 'Verify an NFT username; authenticated callers may persist owner wallet <-> telegram_id binding',
     },
     {
       method: 'POST',
       path: '/api/check/gift',
-      auth: 'public',
-      desc: 'Verify an off-chain gift URL (t.me/nft/<name>) and its holder',
+      auth: 'public verification; x-api-key required when telegramId is supplied',
+      desc: 'Verify an off-chain gift URL (t.me/nft/<name>); authenticated callers may persist its holder binding',
     },
     {
       method: 'POST',
@@ -89,8 +112,18 @@ const API_DOCS = {
       auth: 'public',
       desc: 'Verify a raw NFT item address and optional expected owner',
     },
-    { method: 'GET', path: '/api/owners/:telegramId', auth: 'public', desc: 'Saved bindings for a Telegram user' },
-    { method: 'GET', path: '/api/owners/by-wallet/:wallet', auth: 'public', desc: 'Saved bindings for a wallet' },
+    {
+      method: 'GET',
+      path: '/api/owners/:telegramId',
+      auth: 'x-api-key',
+      desc: 'Saved bindings for a Telegram user',
+    },
+    {
+      method: 'GET',
+      path: '/api/owners/by-wallet/:wallet',
+      auth: 'x-api-key',
+      desc: 'Saved bindings for a wallet',
+    },
     {
       method: 'POST',
       path: '/api/watch',
@@ -160,6 +193,8 @@ app.post(
 );
 
 async function checkUsernameHandler(req: Request, res: Response): Promise<Response> {
+  const authError = requireAuthForBinding(req, res);
+  if (authError) return authError;
   const username = String(req.body?.username || '');
   if (!USERNAME_RE.test(username.replace(/^@/, ''))) return bad(res, 'username_invalid');
   const telegramId = req.body?.telegramId != null ? validTelegramId(req.body.telegramId) : null;
@@ -191,6 +226,8 @@ async function checkUsernameHandler(req: Request, res: Response): Promise<Respon
 app.post('/api/check/username', asyncHandler(checkUsernameHandler));
 
 async function checkGiftHandler(req: Request, res: Response): Promise<Response> {
+  const authError = requireAuthForBinding(req, res);
+  if (authError) return authError;
   const name = String(req.body?.name || '').trim();
   if (!name || name.length > 120) return bad(res, 'name_required');
   const number = req.body?.number != null && String(req.body.number).trim() !== '' ? String(req.body.number) : null;
@@ -299,6 +336,7 @@ app.post('/api/check/nft', asyncHandler(checkNftHandler));
 
 app.get(
   '/api/owners/:telegramId',
+  requireCheckerAuth,
   asyncHandler(async (req, res) => {
     const id = validTelegramId(req.params.telegramId);
     if (id === null) return bad(res, 'telegram_id_invalid');
@@ -309,6 +347,7 @@ app.get(
 
 app.get(
   '/api/owners/by-wallet/:wallet',
+  requireCheckerAuth,
   asyncHandler(async (req, res) => {
     const w = validWallet(req.params.wallet);
     if (!w) return bad(res, 'wallet_invalid');
