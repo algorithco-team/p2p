@@ -256,7 +256,7 @@ export async function saveAdminAlert(kind: string, text: string, meta: Record<st
   } catch (e) {
     console.warn('[db] saveAdminAlert failed', String((e as Error).message || e).slice(0, 300), {
       kind,
-      text: text.slice(0, 100),
+      textLength: typeof text === 'string' ? text.length : 0,
     });
     return null;
   }
