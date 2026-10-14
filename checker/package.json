@@ -16,20 +16,20 @@
     "@ton/core": "^0.63.1",
     "@ton/ton": "^16.3.0",
     "cors": "^2.8.5",
-    "dotenv": "^18.0.4",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.7.0",
-    "pg": "^8.11.0",
+    "dotenv": "^18.0.7",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "pg": "^8.23.1",
     "winston": "^3.19.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.12",
     "@types/express": "^5.0.6",
-    "@types/node": "^26.6.3",
+    "@types/node": "^26.6.5",
     "@types/pg": "^8.10.0",
     "ts-node": "^10.9.0",
     "typescript": "7.0.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.3"
   },
   "overrides": {
     "qs": "^6.16.0"
